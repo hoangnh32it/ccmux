@@ -178,16 +178,33 @@ cache cả phiên sẽ giấu đúng những file agent vừa ghi ra.
       hardcode offset, nên số học dòng không mục nát khi header pane đổi
 - [x] Commit + push lên GitHub (`git push origin main`) khi Phase 4 xong
 
-## Phase 5 — cd tracking tự động (~1 phiên, 3–4h)
+## Phase 5 — cd tracking tự động (~1 phiên, 3–4h) ✅ DONE 2026-08-01
 
-- [ ] Dùng `tmux display-message -p '#{pane_current_path}'` (qua
-      `internal/tmux`) thay vì tự parse OSC7 — tmux đã track sẵn, rẻ
-      hơn nhiều so với cách ccmux-master làm
-- [ ] Poll hoặc hook vào chu kỳ daemon hiện có để refresh root của
-      Files tree khi cwd của pane đang attach thay đổi
-- [ ] Test: fake tmux output đổi `pane_current_path`, xác nhận tree
-      root cập nhật
-- [ ] Commit + push lên GitHub (`git push origin main`) khi Phase 5 xong
+- [x] `tmux.CurrentPath(ctx, session)` dùng `display-message -p
+      '#{pane_current_path}'`, không parse OSC7. Tách `parseCurrentPath`
+      thành hàm thuần để test được output giả mà không cần tmux server
+      thật. Session không tồn tại → trả `""` **không** kèm lỗi (giống
+      `PaneTitle`): vòng poll không được bắt đầu báo lỗi chỉ vì session
+      nó đang theo dõi vừa thoát
+- [x] Hook vào tick 2 giây sẵn có của App, nhưng **chỉ poll khi màn
+      Files đang hiển thị**. Một `tmux display-message` mỗi tick thì rẻ,
+      nhưng không miễn phí, và cái cây không ai nhìn thì không cần mới
+- [x] `attachedLocalSession()` chọn session để theo: đúng **một** local
+      session đang attach, hoặc không theo gì cả. Hai session cùng attach
+      thì không có câu trả lời duy nhất, chọn bừa sẽ làm cây nhảy qua lại
+      giữa 2 project ở các tick xen kẽ. Session remote bị bỏ qua — cwd của
+      nó là đường dẫn trên đĩa máy khác, máy này không walk được
+- [x] Test: `TestParseCurrentPath` bảng 8 dạng output giả; `TestCwdMsgRerootsTree`
+      xác nhận root đổi **và** cây mới được walk thật; thêm test cho
+      no-op cùng path, path rỗng, session cũ, toggle `f`, và ưu tiên
+      pick tay
+- [x] Commit + push lên GitHub (`git push origin main`) khi Phase 5 xong
+
+**Quyết định UX:** tracking bật mặc định (file browser mà lờ đi chỗ bạn
+đang thật sự đứng là mặc định sai), có dấu `⇢` trên dòng path để câu
+"sao cây tự nhảy" luôn có câu trả lời nhìn thấy được. Phím `f` bật/tắt.
+Chọn project bằng tay ở picker sẽ **tự tắt** tracking — người dùng vừa
+chỉ đích danh cái cây họ muốn, tick sau giật đi là hành xử thù địch.
 
 ## Phase 6 — CLI parity (feature surface policy) (~1 phiên, 2–3h)
 

@@ -27,4 +27,4 @@
 │                                                                              │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-? help · q quit · enter open · →/← expand/collapse · e edit                     
+? help · q quit · enter open · →/← expand/collapse · e edit · f follow cwd      

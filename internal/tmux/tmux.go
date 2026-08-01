@@ -233,6 +233,43 @@ func PaneTitle(ctx context.Context, name string) (string, error) {
 	return s, nil
 }
 
+// CurrentPath returns the working directory of the named session's
+// active pane, via tmux's own `#{pane_current_path}` format variable.
+//
+// ccmux does not own the PTY — tmux does — so there is nothing here to
+// parse OSC 7 escape sequences out of, and no reason to: tmux already
+// tracks the directory and will hand it over for the cost of one
+// `display-message`. That is strictly cheaper than adding a terminal-
+// emulation layer, and it keeps every tmux interaction inside this
+// package as the project's convention requires.
+//
+// Returns "" with no error when the session is gone, mirroring
+// PaneTitle: a caller polling on a timer shouldn't have to special-case
+// a session that vanished between two ticks.
+func CurrentPath(ctx context.Context, name string) (string, error) {
+	args := []string{"display-message", "-p", "-t", exactPane(name), "#{pane_current_path}"}
+	out, err := command(ctx, "tmux", args...).Output()
+	if err != nil {
+		return "", nil
+	}
+	return parseCurrentPath(out), nil
+}
+
+// parseCurrentPath trims what `display-message -p` returns: one line
+// with a trailing newline. Split out from CurrentPath so the parsing
+// is table-testable against fake tmux output without a live server.
+//
+// A path made only of whitespace is treated as absent rather than
+// passed through — re-rooting a file tree at " " would produce an
+// empty screen with no explanation.
+func parseCurrentPath(out []byte) string {
+	s := strings.TrimRight(string(out), "\r\n")
+	if strings.TrimSpace(s) == "" {
+		return ""
+	}
+	return s
+}
+
 // SendKeys sends a literal key sequence to the named session.
 func SendKeys(ctx context.Context, name, keys string) error {
 	cmd := command(ctx, "tmux", "send-keys", "-t", exactPane(name), keys)

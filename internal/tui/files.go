@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/skzv/ccmux/internal/filebrowser"
 	"github.com/skzv/ccmux/internal/project"
+	"github.com/skzv/ccmux/internal/tmux"
 	"github.com/skzv/ccmux/internal/tui/components"
 	"github.com/skzv/ccmux/internal/tui/styles"
 )
@@ -79,6 +81,18 @@ type filesModel struct {
 	pickingProject bool
 	projCursor     int
 
+	// followSession is the tmux session whose pane cwd the tree
+	// tracks, pushed from the App as sessions refresh. Empty when
+	// nothing is attached.
+	followSession string
+
+	// followCwd is the tracking toggle, bound to `f`. On by default,
+	// because a file browser that silently ignores where you actually
+	// are is the wrong default. Turned off the moment the user picks a
+	// project explicitly — they asked for that tree, and yanking it
+	// away on the next poll would be hostile.
+	followCwd bool
+
 	loadingSpinner spinner.Model
 	editor         string
 }
@@ -133,6 +147,14 @@ type filesPreviewLoadedMsg struct {
 // $EDITOR exits, since the user may have created or deleted files.
 type filesReloadMsg struct{}
 
+// filesCwdMsg carries the tracked session's pane working directory
+// back from a poll. Session is echoed so a reply about a session the
+// user has since stopped following can be dropped.
+type filesCwdMsg struct {
+	Session string
+	Path    string
+}
+
 func newFiles(st styles.Styles, km Keymap) filesModel {
 	vp := viewport.New(80, 20)
 	sp := spinner.New()
@@ -145,6 +167,7 @@ func newFiles(st styles.Styles, km Keymap) filesModel {
 		editor:         pickEditor(),
 		expanded:       make(map[string]bool),
 		splitRatio:     defaultSplitRatio,
+		followCwd:      true,
 		loadingSpinner: sp,
 	}
 }
@@ -163,6 +186,44 @@ func (m *filesModel) SetProject(p *project.Project) tea.Cmd {
 	}
 	m.project = p
 	return m.SetRoot(p.Path)
+}
+
+// SetFollowSession names the tmux session whose pane cwd the tree
+// should track. Pushed by the App from the session list; empty when
+// nothing is attached.
+func (m *filesModel) SetFollowSession(name string) {
+	m.followSession = name
+}
+
+// FollowActive reports whether a cwd poll is worth dispatching: the
+// toggle is on and there is a session to ask about.
+func (m filesModel) FollowActive() bool {
+	return m.followCwd && m.followSession != ""
+}
+
+// PollCwdCmd asks tmux for the tracked session's pane directory off
+// the UI goroutine. Returns nil when there is nothing to track, so the
+// App can call it unconditionally on its tick.
+//
+// The App only calls this while the Files screen is the visible one.
+// Shelling out to tmux every two seconds for a tree nobody is looking
+// at would burn a process per tick for no observable effect, which is
+// the opposite of the dirty-flag rendering bar the rest of the TUI
+// holds itself to.
+func (m filesModel) PollCwdCmd() tea.Cmd {
+	if !m.FollowActive() {
+		return nil
+	}
+	session := m.followSession
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		path, err := tmux.CurrentPath(ctx, session)
+		if err != nil {
+			return filesCwdMsg{Session: session}
+		}
+		return filesCwdMsg{Session: session, Path: path}
+	}
 }
 
 // SetRoot re-points the tree at a directory and starts a fresh walk.
@@ -474,6 +535,10 @@ func (m filesModel) Update(msg tea.Msg) (filesModel, tea.Cmd) {
 			case "enter":
 				if m.projCursor >= 0 && m.projCursor < len(m.projects) {
 					p := m.projects[m.projCursor]
+					// An explicit pick wins over cwd tracking: the user
+					// named the tree they want, and re-rooting it on the
+					// next poll would undo the thing they just did.
+					m.followCwd = false
 					cmd = m.SetProject(&p)
 				}
 				m.pickingProject = false
@@ -500,6 +565,20 @@ func (m filesModel) Update(msg tea.Msg) (filesModel, tea.Cmd) {
 		}
 		m.loading = true
 		return m, tea.Batch(loadFilesCmd(m.root), m.loadingSpinner.Tick)
+
+	case filesCwdMsg:
+		// Drop a reply about a session we're no longer following, or
+		// one that arrived after the user turned tracking off.
+		if !m.FollowActive() || msg.Session != m.followSession {
+			return m, nil
+		}
+		// An empty path means the pane's directory is gone (deleted out
+		// from under it) or the session exited between the poll and the
+		// reply. Keep the tree where it is rather than blanking it.
+		if msg.Path == "" || msg.Path == m.root {
+			return m, nil
+		}
+		return m, m.SetRoot(msg.Path)
 
 	case filesEntriesLoadedMsg:
 		// Discard a walk the user has already navigated away from.
@@ -539,6 +618,20 @@ func (m filesModel) Update(msg tea.Msg) (filesModel, tea.Cmd) {
 
 	case tea.KeyMsg:
 		switch msg.String() {
+		case "f":
+			m.followCwd = !m.followCwd
+			if !m.followCwd {
+				return m, func() tea.Msg {
+					return toastMsg{
+						Text:  "cwd tracking off — tree stays put",
+						Kind:  toastInfo,
+						Until: time.Now().Add(3 * time.Second),
+					}
+				}
+			}
+			// Turning it back on should catch up immediately rather
+			// than waiting out the poll interval.
+			return m, m.PollCwdCmd()
 		case "p", " ":
 			if len(m.projects) > 0 {
 				m.pickingProject = true
@@ -707,6 +800,7 @@ func (m filesModel) HelpBarProps(width int) components.HelpBarProps {
 			{Key: "→/←", Label: "expand/collapse", Priority: 8},
 			{Key: "e", Label: "edit", Priority: 7},
 			{Key: "p / space", Label: "switch project", Priority: 5},
+			{Key: "f", Label: "follow cwd", Priority: 5},
 			{Key: "tab", Label: "focus preview", Priority: 4},
 			{Key: "drag", Label: "resize split", Priority: 3},
 			{Key: screenKeyRange(), Label: "screens", Priority: 2},
@@ -754,9 +848,16 @@ func (m filesModel) renderTree(width, height int) string {
 	if m.project != nil {
 		title = m.project.Name
 	}
+	// The path line doubles as the tracking indicator: a leading ⇢
+	// when the tree is following a session's cwd, so "why did my tree
+	// just move" has a visible answer.
+	pathLine := compactPath(m.root, width-4)
+	if m.FollowActive() {
+		pathLine = "⇢ " + compactPath(m.root, width-6)
+	}
 	lines := []string{
 		m.st.Emphasis.Render(title) + focusMark,
-		m.st.Muted.Render(compactPath(m.root, width-4)),
+		m.st.Muted.Render(pathLine),
 	}
 	if m.loadErr != "" {
 		lines = append(lines, m.st.StatusError.Render("⚠ "+m.loadErr))

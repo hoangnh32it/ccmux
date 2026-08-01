@@ -37,4 +37,4 @@
 │                                      │ │                                                                             │
 │                                      │ │ Go · 15.0 KiB   tab: focus tree   j/k: scroll   100%                        │
 ╰──────────────────────────────────────╯ ╰─────────────────────────────────────────────────────────────────────────────╯
-? help · q quit · enter open · →/← expand/collapse · e edit · p / space switch project · tab focus preview              
+? help · q quit · enter open · →/← expand/collapse · e edit · p / space switch project · f follow cwd                   

@@ -28,9 +28,9 @@
 
 ## 5. cwd Tracking
 
-- [ ] 5.1 Add a `CurrentPath(session string) (string, error)` helper in `internal/tmux` wrapping `tmux display-message -p -t <session> '#{pane_current_path}'`.
-- [ ] 5.2 Hook the Files screen (or the existing daemon poll cycle) to re-root the tree when the attached pane's cwd changes.
-- [ ] 5.3 Test with a fake `tmux` output changing `pane_current_path`; assert the tree root updates.
+- [x] 5.1 `tmux.CurrentPath(ctx, session)` wrapping `display-message -p -t <session> '#{pane_current_path}'`, plus a pure `parseCurrentPath` so the output handling is testable without a live server. Returns `""` with no error on a missing session, mirroring `PaneTitle` — a poll loop must not start erroring because the session it followed exited.
+- [x] 5.2 The App's existing 2-second tick polls, but only while the Files screen is visible; `attachedLocalSession` picks the session to follow (exactly one attached local session, or none — two attached sessions have no single answer and would make the tree flip between projects on alternate ticks). `filesCwdMsg` re-roots. Tracking is on by default, shown by a `⇢` on the path line, toggled with `f`, and switched off automatically when the user picks a project explicitly.
+- [x] 5.3 `TestParseCurrentPath` table-drives eight shapes of fake tmux output (trailing newline, CRLF, spaces, non-ASCII, empty, whitespace-only). `TestCwdMsgRerootsTree` asserts the tree root updates and the new tree is actually walked; siblings cover the same-path no-op, empty path, stale session, the `f` toggle, and the explicit-pick override.
 
 ## 6. CLI Parity
 

@@ -165,6 +165,29 @@ func tabBarMinWidth() int {
 	return width
 }
 
+// attachedLocalSession returns the name of the local tmux session the
+// user currently has a client attached to, or "" when there isn't
+// exactly one.
+//
+// "Exactly one" is deliberate. With two attached sessions there is no
+// single answer to "where is the user", and picking one arbitrarily
+// would make the Files tree jump between two projects on alternate
+// ticks. Remote sessions are excluded because their cwd is a path on
+// another machine's disk, which this machine cannot walk.
+func attachedLocalSession(sessions []daemon.SessionState) string {
+	found := ""
+	for _, s := range sessions {
+		if !s.Attached || (s.Host != "" && s.Host != "local") {
+			continue
+		}
+		if found != "" {
+			return ""
+		}
+		found = s.Name
+	}
+	return found
+}
+
 // headerRows is how many terminal rows the tab strip occupies.
 // renderHeader ends in forceSingleLine, so it is always exactly one —
 // TestHeaderRowsMatchesRenderedHeader pins that, because a screen that
@@ -599,6 +622,15 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.screen == ScreenSettings && a.settings.MoshiStale() {
 			cmds = append(cmds, detectMoshiCmd())
 		}
+		// Files tracks the attached pane's working directory. Polled
+		// only while that screen is the visible one: a `tmux
+		// display-message` per tick is cheap, but not free, and a tree
+		// nobody is looking at doesn't need to be current.
+		if a.screen == ScreenFiles {
+			if cmd := a.files.PollCwdCmd(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
 		return a, tea.Batch(cmds...)
 
 	case usageTickMsg:
@@ -777,6 +809,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.projectsM.SetAgentCommands(a.cfg.AgentCommands())
 		a.dashboard.SetVersion(a.version)
 		a.sessionsM.SetSessions(a.sessions)
+		a.files.SetFollowSession(attachedLocalSession(a.sessions))
 		if msg.Err != nil {
 			a.toasts.Set(toastError, "refresh: "+msg.Err.Error(), 5*time.Second)
 		}

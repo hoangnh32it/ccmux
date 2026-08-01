@@ -299,3 +299,47 @@ func TestPaneTitle_MissingSessionIsEmpty(t *testing.T) {
 		t.Errorf("missing session should return empty string, got: %q", got)
 	}
 }
+
+// TestParseCurrentPath is the fake-tmux-output half of cwd tracking:
+// every shape `display-message -p '#{pane_current_path}'` can hand
+// back, without needing a live server.
+func TestParseCurrentPath(t *testing.T) {
+	cases := []struct {
+		name string
+		out  string
+		want string
+	}{
+		{"typical output has a trailing newline", "/Users/me/Projects/ccmux\n", "/Users/me/Projects/ccmux"},
+		{"no trailing newline", "/tmp/work", "/tmp/work"},
+		{"CRLF", "/tmp/work\r\n", "/tmp/work"},
+		{"path with spaces survives intact", "/Users/me/My Projects/app\n", "/Users/me/My Projects/app"},
+		{"non-ascii path survives intact", "/Users/me/dự án/ccmux\n", "/Users/me/dự án/ccmux"},
+		// A pane with no resolvable cwd (the directory was deleted out
+		// from under it) reports empty. Re-rooting a tree at "" or " "
+		// would show an empty screen with no explanation, so both are
+		// reported as absent and the caller keeps its current root.
+		{"empty output", "", ""},
+		{"only a newline", "\n", ""},
+		{"only whitespace", "   \n", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parseCurrentPath([]byte(tc.out)); got != tc.want {
+				t.Errorf("parseCurrentPath(%q) = %q, want %q", tc.out, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCurrentPath_MissingSessionIsEmpty mirrors
+// TestPaneTitle_MissingSessionIsEmpty: a poll loop must not start
+// erroring because the session it was following exited.
+func TestCurrentPath_MissingSessionIsEmpty(t *testing.T) {
+	got, err := CurrentPath(t.Context(), "ccmux-currentPath-bogus-DOES-NOT-EXIST")
+	if err != nil {
+		t.Errorf("CurrentPath on a missing session should not error, got: %v", err)
+	}
+	if got != "" {
+		t.Errorf("missing session should return empty string, got: %q", got)
+	}
+}
