@@ -91,6 +91,7 @@ func TestWidthSweep_AllScreens(t *testing.T) {
 		{ScreenAgents, []string{"Claude", "Codex", "Antigravity", "Cursor"}, []string{"switch agent"}},
 		{ScreenSettings, []string{"Settings"}, []string{"config file"}},
 		{ScreenNetwork, []string{"Network"}, []string{"every machine"}},
+		{ScreenFiles, []string{"Files"}, nil},
 	}
 	for _, tc := range cases {
 		for _, w := range widths {

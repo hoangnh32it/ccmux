@@ -1149,7 +1149,7 @@ func (m notesModel) HelpBarProps(width int) components.HelpBarProps {
 			{Key: "p / space", Label: "switch project", Priority: 5},
 			{Key: "H", Label: "device", Priority: 5},
 			{Key: "tab", Label: "focus preview", Priority: 4},
-			{Key: "1-7", Label: "screens", Priority: 2},
+			{Key: screenKeyRange(), Label: "screens", Priority: 2},
 		},
 		Width: width,
 	}

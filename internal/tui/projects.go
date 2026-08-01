@@ -496,7 +496,7 @@ func (m projectsModel) HelpBarProps(width int) components.HelpBarProps {
 			{Key: "a", Label: "switch agent", Priority: 5},
 			{Key: "c", Label: "conversations", Priority: 4},
 			{Key: "r", Label: "refresh", Priority: 3},
-			{Key: "1-7", Label: "screens", Priority: 2},
+			{Key: screenKeyRange(), Label: "screens", Priority: 2},
 		},
 		Width: width,
 	}

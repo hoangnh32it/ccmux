@@ -1,0 +1,30 @@
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ demo ◀                                                                       │
+│ /tmp/demo                                                                    │
+│                                                                              │
+│ ▌ README.md                                                                  │
+│   go.mod                                                                     │
+│   main.go                                                                    │
+│   ▾ cmd/                                                                     │
+│    ▾ serve/                                                                  │
+│     main.go                                                                  │
+│   ▾ docs/                                                                    │
+│    architecture.md                                                           │
+│   ▾ internal/                                                                │
+│    ▾ store/                                                                  │
+│     store.go                                                                 │
+│     store_test.go                                                            │
+│   ▾ web/                                                                     │
+│    ▾ assets/                                                                 │
+│     logo.png                                                                 │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+? help · q quit · enter open · →/← expand/collapse · e edit                     

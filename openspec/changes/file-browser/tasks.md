@@ -13,11 +13,12 @@
 
 ## 3. TUI Screen
 
-- [ ] 3.1 Add `ScreenFiles` to the `Screen` enum in `app.go`, appended after `ScreenNetwork` (key `8`); add its `screenLabels` entry ("Files").
-- [ ] 3.2 Add `filesModel` (new file `internal/tui/files.go`), structured after `notesModel`: tree pane + preview pane, focus switching, scrolling, project switching.
-- [ ] 3.3 Wire `filesModel` into `app.go`'s screen router (`Update`/`View` dispatch, help bar, key handling) the same way `ScreenNotes` is wired.
-- [ ] 3.4 Style exclusively via `internal/tui/styles/` tokens (no literal hex colors or bare padding/margin ints — `styles_lint_test.go` enforces this).
-- [ ] 3.5 Golden test for the new screen (`teatest`), following `screens_golden_test.go`'s pattern.
+- [x] 3.1 Add `ScreenFiles` to the `Screen` enum in `app.go`, appended after `ScreenNetwork` (key `8`); `screenLabels` entry "Files"; `Files` binding (`8`/`f8`) in `keys.go`.
+- [x] 3.2 Add `filesModel` (`internal/tui/files.go`): tree pane + preview pane, focus switching, folding, scrolling, project picker, async walk + async preview load. Renderer forks per file type — Glamour for `.md` (same as Notes), chroma for source, placeholder for binary.
+- [x] 3.3 Wire `filesModel` into `app.go`'s router: `New`, `SetSize`, `SetProjects`, key handler, `Update`/`View` dispatch, help bar, mouse-wheel forwarding.
+- [x] 3.4 Style exclusively via `internal/tui/styles/` tokens — `styles_lint_test.go` passes.
+- [x] 3.5 Five goldens (`files`, `files_preview`, `files_binary`, `files_empty`, `files_narrow`) following `screens_golden_test.go`. The preview golden uses chroma's `noop` formatter so the snapshot stays escape-free and reviewable.
+- [x] 3.6 Replace the hand-written `"1-7"` "screens" hint — present in eight separate help bars and made wrong by this change — with `screenKeyRange()`, derived from `screenCount`. New `TestNoLiteralTabKeyRange` lint closes the bug class, mirroring the existing `TestNoLiteralTabKeyDigits`.
 
 ## 4. Mouse Support
 

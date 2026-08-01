@@ -1,28 +1,28 @@
 ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-│ Network  (6)                                                                                                         │
-│ Telegram: off — ccmux telegram register to control ccmux from your phone                                             │
+│ Files                                                                                                                │
 │                                                                                                                      │
-│ Local                                                                                                                │
-│    ● sputnik  (this device)                                                                                          │
+│ No project selected.                                                                                                 │
 │                                                                                                                      │
-│ Configured                                                                                                           │
-│   ● mac-mini    [SSH ✓]                                                                                              │
-│   ● atelier    [↑ update]                                                                                            │
+│ Press p here to pick one, or 2 to go to the Projects tab.                                                            │
 │                                                                                                                      │
-│ Discovered                                                                                                           │
-│   ● scout    [Tailscale SSH ✓]                                                                                       │
-│   ○ old-box    [no ccmuxd]                                                                                           │
+│ Files browses every file in a project. For markdown only, use the Notes tab.                                         │
 │                                                                                                                      │
-│ Mobile                                                                                                               │
-│   📱 iphone    [Moshi]                                                                                               │
 │                                                                                                                      │
-│ Selected                                                                                                             │
-│   name      sputnik                                                                                                  │
-│   os        darwin                                                                                                   │
-│   address   local:7474                                                                                               │
-│   ccmuxd    v1.0                                                                                                     │
 │                                                                                                                      │
-│ This is the local machine — nothing to ssh into.                                                                     │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
@@ -37,4 +37,4 @@
 │                                                                                                                      │
 │                                                                                                                      │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-? help · q quit · enter ssh · s setup ssh · i details · T telegram · r refresh · 1-8 screens                            
+? help · q quit · enter open · →/← expand/collapse · e edit · p / space switch project · tab focus preview              

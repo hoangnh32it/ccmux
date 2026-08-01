@@ -1,0 +1,40 @@
+╭──────────────────────────────────────╮ ╭─────────────────────────────────────────────────────────────────────────────╮
+│ demo ◀                               │ │ internal/store/store.go                                                     │
+│ /tmp/demo                            │ │ ─────────────────────────────────────────────────────────────────────────── │
+│                                      │ │ package store                                                               │
+│   README.md                          │ │                                                                             │
+│   go.mod                             │ │ import "errors"                                                             │
+│   main.go                            │ │                                                                             │
+│   ▾ cmd/                             │ │ // ErrNotFound is returned when a key is absent.                            │
+│    ▾ serve/                          │ │ var ErrNotFound = errors.New("not found")                                   │
+│     main.go                          │ │                                                                             │
+│   ▾ docs/                            │ │ func Get(key string) (string, error) {                                      │
+│    architecture.md                   │ │     return "", ErrNotFound                                                  │
+│   ▾ internal/                        │ │ }                                                                           │
+│    ▾ store/                          │ │                                                                             │
+│   ▌ store.go                         │ │                                                                             │
+│     store_test.go                    │ │                                                                             │
+│   ▾ web/                             │ │                                                                             │
+│    ▾ assets/                         │ │                                                                             │
+│     logo.png                         │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │ Go · 15.0 KiB   tab: focus tree   j/k: scroll   100%                        │
+╰──────────────────────────────────────╯ ╰─────────────────────────────────────────────────────────────────────────────╯
+? help · q quit · enter open · →/← expand/collapse · e edit · p / space switch project · tab focus preview              

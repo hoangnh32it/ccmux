@@ -15,6 +15,7 @@ type Keymap struct {
 	Claude        key.Binding
 	Settings      key.Binding
 	Network       key.Binding
+	Files         key.Binding
 
 	// In-screen
 	Up      key.Binding
@@ -53,6 +54,7 @@ func DefaultKeymap() Keymap {
 		Claude:        key.NewBinding(key.WithKeys("5", "f5"), key.WithHelp("5", "claude")),
 		Settings:      key.NewBinding(key.WithKeys("6", "f6"), key.WithHelp("6", "settings")),
 		Network:       key.NewBinding(key.WithKeys("7", "f7"), key.WithHelp("7", "network (ssh)")),
+		Files:         key.NewBinding(key.WithKeys("8", "f8"), key.WithHelp("8", "files")),
 
 		Up:      key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
 		Down:    key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),

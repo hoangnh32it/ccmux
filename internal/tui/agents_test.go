@@ -300,22 +300,22 @@ func TestAgents_HelpBar_PerSubtabKeys(t *testing.T) {
 	}{
 		{
 			id:     agent.IDClaude,
-			want:   []string{"m", "e", "a", "y", "c", "enter", "?", "q", "h/l", "1-7"},
+			want:   []string{"m", "e", "a", "y", "c", "enter", "?", "q", "h/l", screenKeyRange()},
 			absent: []string{"(read-only)"},
 		},
 		{
 			id:     agent.IDCodex,
-			want:   []string{"r", "y", "e", "?", "q", "h/l", "1-7"},
+			want:   []string{"r", "y", "e", "?", "q", "h/l", screenKeyRange()},
 			absent: []string{"m", "c", "j", "(read-only)"},
 		},
 		{
 			id:     agent.IDAntigravity,
-			want:   []string{"r", "y", "e", "?", "q", "h/l", "1-7"},
+			want:   []string{"r", "y", "e", "?", "q", "h/l", screenKeyRange()},
 			absent: []string{"m", "c", "j", "(read-only)"},
 		},
 		{
 			id:     agent.IDCursor,
-			want:   []string{"?", "q", "h/l", "1-7"},
+			want:   []string{"?", "q", "h/l", screenKeyRange()},
 			absent: []string{"m", "e", "a", "c", "j", "(read-only)"},
 		},
 	}

@@ -557,7 +557,7 @@ func (m settingsModel) HelpBarProps(width int) components.HelpBarProps {
 		{Key: "q", Label: "quit", Priority: 10},
 		{Key: "i", Label: "info", Priority: 8},
 		{Key: "e", Label: "edit config", Priority: 7},
-		{Key: "1-7", Label: "screens", Priority: 2},
+		{Key: screenKeyRange(), Label: "screens", Priority: 2},
 	}
 	if m.editing {
 		hints = append(hints,

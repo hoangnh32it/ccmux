@@ -125,19 +125,35 @@ của chính nó.
 đổi, chỉ comment dịch chỗ. Kích thước binary **không tăng** vì Glamour
 đã kéo sẵn toàn bộ lexer chroma vào rồi.
 
-## Phase 3 — Màn hình TUI mới + wiring (~2 phiên, 5–8h)
+## Phase 3 — Màn hình TUI mới + wiring (~2 phiên, 5–8h) ✅ DONE 2026-08-01
 
-- [ ] Thêm `ScreenFiles` vào enum `Screen` trong `app.go`
-      (`allScreens()`/`screenLabels` tự động ăn theo, không cần sửa tay
-      header)
-- [ ] Model `filesModel` (dựa trên khung `notesModel`): 2 pane
-      tree/preview, focus switch, scroll
-- [ ] Style: dùng token có sẵn trong `internal/tui/styles/` — **không**
-      hardcode hex color hay số nguyên padding (bị chặn bởi
-      `styles_lint_test.go`)
-- [ ] Golden test cho màn hình mới (`teatest`, theo mẫu
-      `screens_golden_test.go`)
-- [ ] Commit + push lên GitHub (`git push origin main`) khi Phase 3 xong
+- [x] Thêm `ScreenFiles` vào cuối enum `Screen` (phím `8`) — header,
+      `allScreens()`, `screenLabels` tự ăn theo. Thêm binding `8`/`f8`
+      trong `keys.go`
+- [x] Model `filesModel` (`internal/tui/files.go`, 944 dòng — bằng ~56%
+      `notes.go` vì logic cây đã nằm ở `internal/filebrowser` dạng hàm
+      thuần): 2 pane tree/preview, focus switch, fold/unfold, scroll,
+      project picker, walk **và** đọc preview đều async
+- [x] Style: chỉ dùng token trong `internal/tui/styles/` —
+      `styles_lint_test.go` pass
+- [x] 5 golden test: `files`, `files_preview`, `files_binary`,
+      `files_empty`, `files_narrow`. Golden preview dùng formatter
+      `noop` của chroma nên snapshot không có escape — 256-màu thật sẽ
+      nhét hàng trăm escape vào file, không review nổi mà chẳng chứng
+      minh thêm điều gì so với test của package
+- [x] Commit + push lên GitHub (`git push origin main`) khi Phase 3 xong
+
+**Ngoài checklist — bắt buộc phải sửa:** hint `"1-7"` ("screens") được
+viết tay ở **8 help bar khác nhau**; thêm tab thứ 8 làm cả 8 chỗ nói
+dối cùng lúc. Thay bằng `screenKeyRange()` suy từ `screenCount`, và
+thêm lint `TestNoLiteralTabKeyRange` — đúng nhóm bug mà
+`TestNoLiteralTabKeyDigits` đã chặn cho digit đơn, chỉ khác hình dạng.
+
+**Quyết định thu hẹp phạm vi:** Files **không** có search (ripgrep) và
+**không** có chuyển device `H` như Notes. Spec chỉ yêu cầu `--host` ở
+phía CLI (Phase 6), không yêu cầu ở TUI. Cũng không cache entry theo
+project như Notes: mục đích của cây Files là thấy đĩa **ngay lúc này**,
+cache cả phiên sẽ giấu đúng những file agent vừa ghi ra.
 
 ## Phase 4 — Mouse: click-focus + drag-resize (~1–2 phiên, 4–6h)
 

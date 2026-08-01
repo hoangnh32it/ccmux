@@ -778,7 +778,7 @@ func (m conversationsModel) HelpBarProps(width int) components.HelpBarProps {
 			{Key: "tab", Label: "sections", Priority: 5},
 			{Key: "H", Label: "headless: " + hStatus, Priority: 4},
 			{Key: "r", Label: "refresh", Priority: 3},
-			{Key: "1-7", Label: "screens", Priority: 2},
+			{Key: screenKeyRange(), Label: "screens", Priority: 2},
 		},
 		Width: width,
 	}

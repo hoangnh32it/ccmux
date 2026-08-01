@@ -141,6 +141,69 @@ func TestNoLiteralTabKeyDigits(t *testing.T) {
 	}
 }
 
+// TestNoLiteralTabKeyRange is the sibling lint for the *range* form.
+// Every screen's help bar carries a "screens" hint spanning the whole
+// tab strip, and for a long time each of the eight spelled it "1-7" by
+// hand. Adding the Files tab turned all eight into a lie in one
+// commit — exactly the bug class TestNoLiteralTabKeyDigits closes for
+// single digits, just one shape wider.
+//
+// The fix is screenKeyRange(), which derives the span from
+// screenCount.
+func TestNoLiteralTabKeyRange(t *testing.T) {
+	// "1-7", "1-8", … in a string literal.
+	rangeLiteral := regexp.MustCompile(`"1-[1-9]"`)
+
+	err := filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			if path != "." {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		for i, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "//") {
+				continue
+			}
+			if hit := rangeLiteral.FindString(line); hit != "" {
+				t.Errorf("%s:%d uses %s — that's a hand-written tab-key range. "+
+					"Use screenKeyRange() so it tracks screenCount.\n  line: %s",
+					path, i+1, hit, strings.TrimSpace(line))
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk internal/tui: %v", err)
+	}
+}
+
+// TestScreenKeyRange_TracksScreenCount pins the helper's output to the
+// enum so the lint above has something correct to point people at.
+func TestScreenKeyRange_TracksScreenCount(t *testing.T) {
+	want := "1-" + itoaTest(int(screenCount))
+	if got := screenKeyRange(); got != want {
+		t.Errorf("screenKeyRange() = %q, want %q", got, want)
+	}
+	// The range's upper bound must equal the last screen's own key,
+	// or the hint promises a tab that isn't there.
+	last := allScreens()[len(allScreens())-1]
+	if !strings.HasSuffix(screenKeyRange(), screenKey(last)) {
+		t.Errorf("screenKeyRange() = %q does not end at the last screen's key %q (%s)",
+			screenKeyRange(), screenKey(last), last)
+	}
+}
+
 // containsDigitNear is a soft check: the wanted digit must appear
 // within ~80 chars of the anchor word in the rendered output, both
 // after ANSI stripping. The empty-state hints wrap the digit in style

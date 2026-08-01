@@ -142,7 +142,7 @@ func TestRenderHeader_NarrowCollapsesToNumbers(t *testing.T) {
 // doesn't quietly shift the boundary. The arithmetic mirrors the
 // helper exactly; if you rename a screen, update both sides.
 func TestTabBarMinWidth_PinsExpectedValue(t *testing.T) {
-	// " ccmux " + " [N] Name " for each of the 7 current screens.
+	// " ccmux " + " [N] Name " for each of the 8 current screens.
 	want := len(" ccmux ") +
 		len(" [1] Sessions ") +
 		len(" [2] Projects ") +
@@ -150,7 +150,8 @@ func TestTabBarMinWidth_PinsExpectedValue(t *testing.T) {
 		len(" [4] Notes ") +
 		len(" [5] Agents ") +
 		len(" [6] Settings ") +
-		len(" [7] Network ")
+		len(" [7] Network ") +
+		len(" [8] Files ")
 	if got := tabBarMinWidth(); got != want {
 		t.Errorf("tabBarMinWidth = %d, want %d (rename a screen → update one of the sides)", got, want)
 	}

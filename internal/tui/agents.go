@@ -169,7 +169,7 @@ func (m agentsModel) HelpBarProps(width int) components.HelpBarProps {
 			components.KeyHint{Key: "e", Label: "edit", Priority: 3},
 		)
 	}
-	hints = append(hints, components.KeyHint{Key: "1-7", Label: "screens", Priority: 2})
+	hints = append(hints, components.KeyHint{Key: screenKeyRange(), Label: "screens", Priority: 2})
 	return components.HelpBarProps{Hints: hints, Width: width}
 }
 

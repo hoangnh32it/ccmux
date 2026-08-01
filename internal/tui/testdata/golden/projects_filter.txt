@@ -37,4 +37,4 @@
 │                                                          │ │                                                         │
 │                                                          │ │                                                         │
 ╰──────────────────────────────────────────────────────────╯ ╰─────────────────────────────────────────────────────────╯
-? help · q quit · enter attach · n new · i info · / filter · a switch agent · c conversations · r refresh · 1-7 screens 
+? help · q quit · enter attach · n new · i info · / filter · a switch agent · c conversations · r refresh · 1-8 screens 

@@ -62,6 +62,16 @@ const (
 	ScreenAgents
 	ScreenSettings
 	ScreenNetwork
+	// ScreenFiles is the whole-project file browser: tree on the
+	// left, syntax-highlighted preview on the right. Appended last
+	// (key "8") rather than slotted next to Notes, which is where it
+	// belongs thematically — screenKey() derives each tab's digit
+	// from its position here, so inserting anywhere but the end
+	// silently renumbers every screen after it and breaks the muscle
+	// memory of everyone already using the tool. Append is the only
+	// additive option; the same reasoning put the Grok agent at the
+	// end of its own list.
+	ScreenFiles
 
 	// screenCount is a sentinel — it must stay LAST in this block. It
 	// equals the number of real screens, so allScreens() can iterate
@@ -90,6 +100,7 @@ var screenLabels = [screenCount]string{
 	ScreenAgents:        "Agents",
 	ScreenSettings:      "Settings",
 	ScreenNetwork:       "Network",
+	ScreenFiles:         "Files",
 }
 
 func (s Screen) String() string {
@@ -124,6 +135,18 @@ func allScreens() []Screen {
 // fails the build if anyone tries.
 func screenKey(s Screen) string {
 	return strconv.Itoa(int(s) + 1)
+}
+
+// screenKeyRange returns the "1-8" span every screen's help bar shows
+// for "screens". Derived from screenCount for the same reason
+// screenKey is derived from enum position: the literal "1-7" was
+// hardcoded in eight separate help bars, and adding the Files tab
+// turned every one of them into a lie at once.
+//
+// TestNoLiteralTabKeyRange fails the build if a literal range comes
+// back.
+func screenKeyRange() string {
+	return "1-" + strconv.Itoa(int(screenCount))
 }
 
 // tabBarMinWidth is the minimum terminal cols at which the WIDE tab
@@ -161,6 +184,7 @@ type App struct {
 	conversationsM conversationsModel
 	projectsM      projectsModel
 	notes          notesModel
+	files          filesModel
 	agentsM        agentsModel
 	settings       settingsModel
 	network        networkModel
@@ -261,6 +285,7 @@ func New(cfg config.Config, version string) App {
 		conversationsM: newConversations(st, km),
 		projectsM:      newProjects(st, km),
 		notes:          newNotes(st, km),
+		files:          newFiles(st, km),
 		agentsM:        newAgents(st, km),
 		settings:       newSettings(st, km, cfg, version),
 		network:        newNetwork(st, km),
@@ -487,6 +512,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.width, a.height = msg.Width, msg.Height
 		a.matrix.SetSize(msg.Width, msg.Height)
 		a.notes.SetSize(msg.Width, msg.Height)
+		a.files.SetSize(msg.Width, msg.Height)
 		return a, nil
 
 	case matrixTickMsg:
@@ -746,8 +772,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Err == nil {
 			a.projects = msg.Projects
 			a.projectsM.SetProjects(a.projects)
-			// Notes screen needs the full list for its project picker.
+			// Notes and Files both offer a project picker.
 			a.notes.SetProjects(a.projects)
+			a.files.SetProjects(a.projects)
 		}
 		return a, nil
 
@@ -1046,6 +1073,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch a.screen {
 			case ScreenNotes:
 				a.notes, cmd = a.notes.Update(msg)
+			case ScreenFiles:
+				a.files, cmd = a.files.Update(msg)
 			case ScreenAgents:
 				a.agentsM, cmd = a.agentsM.Update(msg)
 			}
@@ -1369,6 +1398,17 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case keyMatches(msg, a.keys.Settings):
 			a.screen = ScreenSettings
 			return a, nil
+		case keyMatches(msg, a.keys.Files):
+			a.screen = ScreenFiles
+			// Follow whatever project the user last highlighted on the
+			// Projects tab, the same handoff the Notes key performs.
+			// SetProject returns a Cmd that walks the tree off the UI
+			// goroutine, so a big repo doesn't freeze the switch.
+			var cmd tea.Cmd
+			if sel := a.projectsM.Selected(); sel != nil {
+				cmd = a.files.SetProject(sel)
+			}
+			return a, cmd
 		case keyMatches(msg, a.keys.Network):
 			a.screen = ScreenNetwork
 			// Kick the spinner column on screen-enter so the user
@@ -1479,6 +1519,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.projectsM, cmd = a.projectsM.Update(msg)
 	case ScreenNotes:
 		a.notes, cmd = a.notes.Update(msg)
+	case ScreenFiles:
+		a.files, cmd = a.files.Update(msg)
 	case ScreenAgents:
 		a.agentsM, cmd = a.agentsM.Update(msg)
 	case ScreenSettings:
@@ -1561,6 +1603,8 @@ func (a App) View() string {
 		body = a.projectsM.View(a.width, bodyHeight)
 	case ScreenNotes:
 		body = a.notes.View(a.width, bodyHeight)
+	case ScreenFiles:
+		body = a.files.View(a.width, bodyHeight)
 	case ScreenAgents:
 		body = a.agentsM.View(a.width, bodyHeight)
 	case ScreenSettings:
@@ -1870,6 +1914,8 @@ func (a App) helpBarProps() components.HelpBarProps {
 		return a.conversationsM.HelpBarProps(a.width)
 	case ScreenNotes:
 		return a.notes.HelpBarProps(a.width)
+	case ScreenFiles:
+		return a.files.HelpBarProps(a.width)
 	case ScreenSettings:
 		return a.settings.HelpBarProps(a.width)
 	case ScreenAgents:
@@ -1882,7 +1928,7 @@ func (a App) helpBarProps() components.HelpBarProps {
 				{Key: "?", Label: "help", Priority: 10},
 				{Key: "q", Label: "quit", Priority: 10},
 				{Key: "r", Label: "refresh", Priority: 6},
-				{Key: "1-7", Label: "screens", Priority: 4},
+				{Key: screenKeyRange(), Label: "screens", Priority: 4},
 			},
 			Width: a.width,
 		}
