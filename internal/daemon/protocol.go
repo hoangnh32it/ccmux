@@ -202,6 +202,42 @@ type NoteContent struct {
 	Content string `json:"content"`
 }
 
+// FileEntry is one file in a project's whole tree — the Files screen's
+// listing, as opposed to NoteEntry's markdown-only vault.
+// Returned by GET /v1/files?project=<name>.
+//
+// There is no Display field. NoteEntry carries one because a note's
+// label is its leading H1, which means reading every file at list
+// time; a file browser labels rows with the filename, so the name is
+// all a client needs and the walk stays cheap.
+type FileEntry struct {
+	Rel      string    `json:"rel"`      // slash-separated path from the project root
+	Dir      string    `json:"dir"`      // "" for a root-level file
+	Name     string    `json:"name"`     // base filename
+	Size     int64     `json:"size"`     // bytes on disk
+	Modified time.Time `json:"modified"` // file mtime
+}
+
+// FileContent is one file's body.
+// Returned by GET /v1/files?project=<name>&file=<rel>.
+type FileContent struct {
+	Rel     string `json:"rel"`
+	Content string `json:"content"` // empty when Binary
+	Size    int64  `json:"size"`    // full size on disk, even when Truncated
+
+	// Binary means the content sniff rejected this as text. Content is
+	// empty rather than filled with bytes no caller should print.
+	Binary bool `json:"binary,omitempty"`
+
+	// Truncated means Content holds only the head of a file that
+	// exceeded the server's preview cap.
+	Truncated bool `json:"truncated,omitempty"`
+
+	// Lang is the detected language's display name, "" when
+	// unrecognized. Lets a client highlight without re-sniffing.
+	Lang string `json:"lang,omitempty"`
+}
+
 // SearchHit is one match from GET /v1/notes/search?project=<name>&q=<query>.
 // Mirrors internal/notes.SearchHit minus the absolute on-disk Path, which
 // is meaningless to a remote caller.

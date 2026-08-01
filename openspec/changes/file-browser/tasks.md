@@ -34,8 +34,8 @@
 
 ## 6. CLI Parity
 
-- [ ] 6.1 Add `cmd/ccmux/cmd/files.go`: `ccmux files list <project>` and `ccmux files read <project> <path> [--host <name>]`, mirroring the `notes` subcommand's flags and output shape.
-- [ ] 6.2 CLI tests mirroring the existing `notes` CLI tests.
+- [x] 6.1 `cmd/ccmux/cmd/files.go`: `ccmux files list <project>` and `ccmux files read <project> <path> [--host <name>]`, mirroring `notes`' subcommand names, `--host` flag, and output shape (table, then raw body). Backed by a new `GET /v1/files` daemon endpoint (`handleFiles`) plus `daemon.Client.Files` / `.FileContent` and the `FileEntry` / `FileContent` protocol types — the CLI reaches local and remote through the same client the TUI uses, as `notes` does.
+- [x] 6.2 CLI tests drive the real client against an `httptest` daemon: list formatting, raw read, binary refusal, truncation notice going to stderr so a redirected stdout stays clean, unknown-host rejection, and the command shape itself. Daemon-side tests cover traversal rejection, every-file-type serving, binary flagging, tree pruning, method/project guards, and 404.
 
 ## 7. Verification
 

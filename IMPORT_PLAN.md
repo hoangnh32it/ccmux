@@ -206,13 +206,28 @@ cache cả phiên sẽ giấu đúng những file agent vừa ghi ra.
 Chọn project bằng tay ở picker sẽ **tự tắt** tracking — người dùng vừa
 chỉ đích danh cái cây họ muốn, tick sau giật đi là hành xử thù địch.
 
-## Phase 6 — CLI parity (feature surface policy) (~1 phiên, 2–3h)
+## Phase 6 — CLI parity (feature surface policy) (~1 phiên, 2–3h) ✅ DONE 2026-08-01
 
-- [ ] Thêm subcommand kiểu `ccmux files list|read <project> [--host]`
-      mirroring `ccmux notes list|read|search` đã có
-- [ ] Cobra command file mới trong `cmd/ccmux/cmd/`
-- [ ] Test CLI (giống test hiện có cho notes CLI)
-- [ ] Commit + push lên GitHub (`git push origin main`) khi Phase 6 xong
+- [x] `ccmux files list <project>` và `ccmux files read <project> <path>
+      [--host]` trong `cmd/ccmux/cmd/files.go` — cùng tên subcommand,
+      cùng flag `--host`, cùng dạng output (bảng rồi body thô) với
+      `ccmux notes`
+- [x] **Phát sinh ngoài dự kiến:** `notes` CLI đi qua daemon **kể cả khi
+      local**, nên Files cũng phải có endpoint riêng. Thêm
+      `GET /v1/files` (`handleFiles`), `daemon.Client.Files` /
+      `.FileContent`, và 2 kiểu protocol `FileEntry` / `FileContent`.
+      Nhờ vậy local và remote đi chung một client, đúng như `notes`
+- [x] Handler **không** có check traversal inline như `handleNotes`:
+      containment nằm trong `filebrowser.Tree.Resolve` (Phase 1), và
+      `Preview` đi qua nó. `notes.Vault.Read` tin đầu vào của nó nên
+      phải chặn ở handler; `filebrowser` thì không, nên hàng rào ở cạnh
+      primitive thay vì suy lại ở từng call site
+- [x] Test CLI drive client thật qua `httptest` daemon: format bảng,
+      đọc thô, **từ chối file binary** (đổ PNG vào terminal là hỏng
+      trạng thái terminal), cảnh báo truncate đẩy ra **stderr** để
+      `> out` sạch, host sai bị từ chối. Phía daemon: traversal, mọi
+      loại file, cờ binary, prune, guard method/project, 404
+- [x] Commit + push lên GitHub (`git push origin main`) khi Phase 6 xong
 
 ## Phase 7 — Tests tổng hợp + fuzz (nếu áp dụng) (~1 phiên, 3–4h)
 

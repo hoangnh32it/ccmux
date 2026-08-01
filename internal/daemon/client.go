@@ -301,6 +301,31 @@ func (c *Client) NoteContent(ctx context.Context, project, rel string) (NoteCont
 	return out, nil
 }
 
+// Files lists every file in the named project's tree on this client's
+// daemon — the whole tree, not just markdown. Same local/remote
+// transparency as Notes: the Client encapsulates the target.
+func (c *Client) Files(ctx context.Context, project string) ([]FileEntry, error) {
+	q := url.Values{"project": {project}}
+	var out []FileEntry
+	if err := c.getJSON(ctx, "/v1/files?"+q.Encode(), &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// FileContent reads one file (project-relative, slash-separated path)
+// from this client's daemon. A binary file comes back with Binary set
+// and Content empty — the server will not ship bytes a caller would
+// then have to guard before printing.
+func (c *Client) FileContent(ctx context.Context, project, rel string) (FileContent, error) {
+	q := url.Values{"project": {project}, "file": {rel}}
+	var out FileContent
+	if err := c.getJSON(ctx, "/v1/files?"+q.Encode(), &out); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
 // SearchNotes runs a search across the named project's vault on this
 // client's daemon. Older daemons that predate /v1/notes/search return a
 // 404, surfaced here as an error so callers can report "search

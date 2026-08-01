@@ -35,6 +35,7 @@ import (
 	"github.com/skzv/ccmux/internal/conversations"
 	"github.com/skzv/ccmux/internal/daemon"
 	"github.com/skzv/ccmux/internal/fcm"
+	"github.com/skzv/ccmux/internal/filebrowser"
 	"github.com/skzv/ccmux/internal/moshi"
 	"github.com/skzv/ccmux/internal/notes"
 	"github.com/skzv/ccmux/internal/openrouterusage"
@@ -421,6 +422,7 @@ func (s *server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/v1/usage", s.handleUsage)
 	mux.HandleFunc("/v1/notes/search", s.handleNotesSearch)
 	mux.HandleFunc("/v1/notes", s.handleNotes)
+	mux.HandleFunc("/v1/files", s.handleFiles)
 	mux.HandleFunc("/v1/models", s.handleModels)
 }
 
@@ -880,6 +882,76 @@ func (s *server) resolveProject(w http.ResponseWriter, r *http.Request) (project
 	}
 	http.Error(w, "project not found", http.StatusNotFound)
 	return project.Project{}, false
+}
+
+// handleFiles serves GET /v1/files?project=<name>[&file=<rel>] — the
+// Files screen's whole-tree listing, and one file's body.
+//
+// Security: the project is resolved through s.resolveProject, the same
+// gate handleNotes uses, so a caller can only reference projects ccmux
+// already lists. The file path is contained by filebrowser.Tree
+// itself: Resolve rejects absolute paths, ".." traversal, and symlinks
+// pointing out of the tree, and Preview goes through it. That is why
+// this handler has none of handleNotes' inline traversal checks —
+// notes.Vault.Read trusts its input, filebrowser.Tree.Preview does
+// not, so the guard lives with the primitive instead of being
+// re-derived at each call site.
+//
+// Unlike /v1/notes there is no extension filter. Serving every file is
+// the entire point of this endpoint; the protections that matter are
+// containment (above), the binary guard, and the size cap — all of
+// which the package applies.
+func (s *server) handleFiles(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	proj, ok := s.resolveProject(w, r)
+	if !ok {
+		return
+	}
+	tree := filebrowser.Open(proj.Path)
+
+	if rel := strings.TrimSpace(r.URL.Query().Get("file")); rel != "" {
+		p, err := tree.Preview(rel)
+		if err != nil {
+			if os.IsNotExist(err) {
+				http.Error(w, "file not found", http.StatusNotFound)
+				return
+			}
+			// Everything else Resolve/Preview rejects is a bad request
+			// from the caller: an absolute path, traversal out of the
+			// tree, or a directory.
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, daemon.FileContent{
+			Rel:       p.Rel,
+			Content:   p.Content,
+			Size:      p.Size,
+			Binary:    p.Binary,
+			Truncated: p.Truncated,
+			Lang:      p.Lang,
+		})
+		return
+	}
+
+	entries, err := tree.List()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	out := make([]daemon.FileEntry, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, daemon.FileEntry{
+			Rel:      e.Rel,
+			Dir:      e.Dir,
+			Name:     e.Name,
+			Size:     e.Size,
+			Modified: e.Modified,
+		})
+	}
+	writeJSON(w, out)
 }
 
 // handleNotesSearch serves GET /v1/notes/search?project=<name>&q=<query>,
