@@ -25,6 +25,12 @@ CLAUDE.md), kèm test cho từng phần.
 
 Tổng ước lượng: **~10–13 phiên agent** (~28–42 giờ công quy đổi).
 
+Repo: [github.com/hoangnh32it/ccmux](https://github.com/hoangnh32it/ccmux)
+(public, khởi tạo 2026-08-01 với baseline commit trước khi bắt đầu
+Phase 1). **Quy ước: sau khi hoàn thành mỗi phase bên dưới, commit +
+push lên `main` ngay** — mỗi phase là 1 commit riêng, message nêu rõ
+phase nào vừa xong, để lịch sử git phản ánh đúng tiến độ tài liệu này.
+
 ---
 
 ## Phase 0 — Spec & thiết kế (~1 phiên, 2–3h) ✅ DONE 2026-08-01
@@ -48,6 +54,8 @@ Tổng ước lượng: **~10–13 phiên agent** (~28–42 giờ công quy đ�
       qua `tmux display-message -p '#{pane_current_path}'` thay vì OSC7
 - [x] Tasks.md đã liệt kê chi tiết theo từng phase 2–8 tiếp theo, khớp
       với danh sách trong file kế hoạch này
+- [x] Init git repo cho `ccmux-main`, tạo GitHub repo
+      `hoangnh32it/ccmux` (public), push baseline commit
 
 ## Phase 1 — File-tree cho mọi loại file (~2 phiên, 5–7h)
 
@@ -60,6 +68,7 @@ Tổng ước lượng: **~10–13 phiên agent** (~28–42 giờ công quy đ�
 - [ ] Thêm binary-file detection (tránh load file nhị phân vào preview)
 - [ ] Unit test cho walk logic + fold/unfold (table-driven, theo style
       test hiện có)
+- [ ] Commit + push lên GitHub (`git push origin main`) khi Phase 1 xong
 
 ## Phase 2 — Preview syntax-highlight (~2 phiên, 5–7h)
 
@@ -72,6 +81,7 @@ Tổng ước lượng: **~10–13 phiên agent** (~28–42 giờ công quy đ�
 - [ ] Giới hạn kích thước file preview (tránh lag với file lớn) — theo
       đúng nguyên tắc "Dirty-flag rendering" / hiệu năng ccmux-main đang
       theo đuổi
+- [ ] Commit + push lên GitHub (`git push origin main`) khi Phase 2 xong
 
 ## Phase 3 — Màn hình TUI mới + wiring (~2 phiên, 5–8h)
 
@@ -85,6 +95,7 @@ Tổng ước lượng: **~10–13 phiên agent** (~28–42 giờ công quy đ�
       `styles_lint_test.go`)
 - [ ] Golden test cho màn hình mới (`teatest`, theo mẫu
       `screens_golden_test.go`)
+- [ ] Commit + push lên GitHub (`git push origin main`) khi Phase 3 xong
 
 ## Phase 4 — Mouse: click-focus + drag-resize (~1–2 phiên, 4–6h)
 
@@ -96,6 +107,7 @@ Tổng ước lượng: **~10–13 phiên agent** (~28–42 giờ công quy đ�
       lưu tỉ lệ, tương tự cách notes.go quản lý `previewPaneSize()`
 - [ ] Test tương tác chuột (nếu có harness) hoặc ít nhất unit test cho
       hàm tính lại tỉ lệ cột từ toạ độ chuột
+- [ ] Commit + push lên GitHub (`git push origin main`) khi Phase 4 xong
 
 ## Phase 5 — cd tracking tự động (~1 phiên, 3–4h)
 
@@ -106,6 +118,7 @@ Tổng ước lượng: **~10–13 phiên agent** (~28–42 giờ công quy đ�
       Files tree khi cwd của pane đang attach thay đổi
 - [ ] Test: fake tmux output đổi `pane_current_path`, xác nhận tree
       root cập nhật
+- [ ] Commit + push lên GitHub (`git push origin main`) khi Phase 5 xong
 
 ## Phase 6 — CLI parity (feature surface policy) (~1 phiên, 2–3h)
 
@@ -113,6 +126,7 @@ Tổng ước lượng: **~10–13 phiên agent** (~28–42 giờ công quy đ�
       mirroring `ccmux notes list|read|search` đã có
 - [ ] Cobra command file mới trong `cmd/ccmux/cmd/`
 - [ ] Test CLI (giống test hiện có cho notes CLI)
+- [ ] Commit + push lên GitHub (`git push origin main`) khi Phase 6 xong
 
 ## Phase 7 — Tests tổng hợp + fuzz (nếu áp dụng) (~1 phiên, 3–4h)
 
@@ -122,6 +136,7 @@ Tổng ước lượng: **~10–13 phiên agent** (~28–42 giờ công quy đ�
       chọn file, xem preview, resize
 - [ ] Cross-compile check `GOOS=windows`, `GOOS=linux` nếu đụng code
       OS-specific (mouse/path handling)
+- [ ] Commit + push lên GitHub (`git push origin main`) khi Phase 7 xong
 
 ## Phase 8 — Docs (~0.5–1 phiên, 1–2h)
 
@@ -131,6 +146,7 @@ Tổng ước lượng: **~10–13 phiên agent** (~28–42 giờ công quy đ�
       trúc màn hình mới, theo mẫu `01_Notes_System.md`
 - [ ] Cập nhật `CLAUDE.md` phần Components nếu thêm package mới
       (`internal/filebrowser`)
+- [ ] Commit + push lên GitHub (`git push origin main`) khi Phase 8 xong
 
 ---
 
