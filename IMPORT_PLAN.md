@@ -260,15 +260,38 @@ bao giờ exec ccmux đã cài" giờ được thực thi bằng **thứ tự** 
 build đứng trước) thay vì bằng cách xoá thư mục. Thêm
 `TestE2EPath_KeepsTmuxReachable` để chặn hồi quy.
 
-## Phase 8 — Docs (~0.5–1 phiên, 1–2h)
+## Phase 8 — Docs (~0.5–1 phiên, 1–2h) ✅ DONE 2026-08-01
 
-- [ ] Cập nhật `README.md` (mục feature list + có thể thêm 1 GIF demo
-      theo `docs/vhs/`)
-- [ ] Thêm trang `docs/02_Architecture/0X_File_Browser.md` mô tả kiến
-      trúc màn hình mới, theo mẫu `01_Notes_System.md`
-- [ ] Cập nhật `CLAUDE.md` phần Components nếu thêm package mới
-      (`internal/filebrowser`)
-- [ ] Commit + push lên GitHub (`git push origin main`) khi Phase 8 xong
+- [x] `README.md`: mục kể chuyện "Read the code your agent just wrote"
+      đặt cạnh mục Notes, và khối "File browser" trong full feature list
+- [x] `docs/02_Architecture/07_File_Browser.md` theo mẫu
+      `01_Notes_System.md` — design stance, **tại sao tách khỏi Notes**,
+      components, cách walk, preview/binary/highlight/size cap, cwd
+      tracking, mouse, phím, daemon API, CLI, và các quyết định đã chốt
+- [x] `CLAUDE.md`: thêm `internal/filebrowser` vào Components; sửa mục
+      `internal/tui` (đang liệt kê màn "Setup" **không tồn tại** và
+      thiếu 4 màn có thật) thành đủ 8 màn; thêm doc mới vào Docs Map
+- [x] `docs/02_Architecture/05_HTTP_API.md`: endpoint `GET /v1/files`,
+      kèm ngữ nghĩa 400/404 và dạng response binary/truncated
+- [x] Commit + push lên GitHub (`git push origin main`) khi Phase 8 xong
+
+**Chưa làm — cần bạn quyết:** GIF demo trong `docs/vhs/`. Việc này cần
+`vhs` (chưa cài) và phải quay trên máy có terminal thật; các CUJ khác
+đều có `.tape` file nên nếu muốn thì đây là bước riêng, không chặn gì.
+
+---
+
+## Kết thúc
+
+Cả 8 phase đã xong và đã push. Trạng thái cuối:
+
+- `go test ./...` sạch · `make test-e2e` sạch · `gofmt`/`go vet`/
+  `staticcheck` sạch · cross-compile linux/amd64, windows/amd64,
+  windows/arm64
+- `openspec validate file-browser` pass, mọi task trong
+  `openspec/changes/file-browser/tasks.md` đã tick
+- Change này giờ có thể archive (`openspec archive file-browser`) —
+  chưa làm vì đó là quyết định của bạn, không phải của Claude
 
 ---
 

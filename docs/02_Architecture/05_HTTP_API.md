@@ -238,6 +238,28 @@ Ripgrep-backed search across a project's markdown vault.
 - **Response `200`:** `[]SearchHit`. (Older daemons return `404` → treat as
   "search unavailable.")
 
+#### `GET /v1/files`
+List a project's whole file tree, or (with `&file=`) read one file. Same
+project gate as `/v1/notes`, but **no extension filter** — serving every
+file type is the point. Version-control, dependency, and build-output
+directories are pruned, matching the TUI's Files screen.
+- **Query:** `?project=<name>` required; optional `&file=<project-relative
+  path>`.
+- **Response `200`:** list mode → `[]FileEntry`; file mode → `FileContent`.
+- **Response `400`:** the path is absolute, escapes the project root via
+  `..` or a symlink, or names a directory. Containment is enforced by
+  `filebrowser.Tree.Resolve`, not by inline checks in the handler.
+- **Response `404`:** no such file.
+
+A binary file returns `FileContent` with `binary: true` and an empty
+`content` — the daemon will not ship bytes a client would have to guard
+before printing. A file past the server's preview cap returns
+`truncated: true` with `size` still reporting the real on-disk length.
+
+```json
+{ "rel": "internal/tui/app.go", "content": "package tui\n…", "size": 98304, "lang": "Go" }
+```
+
 ---
 
 ### Models

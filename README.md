@@ -128,6 +128,14 @@ Notes follow you across devices: press `H` to toggle which machine you're viewin
 
 ---
 
+## 🗂️ Read the code your agent just wrote.
+
+Notes is markdown. **Files** (`8`) is the whole project: every file in the tree, with a syntax-highlighted preview so you can read the diff your agent just landed without leaving ccmux. Source goes through [chroma](https://github.com/alecthomas/chroma) in the same Catppuccin palette as the rest of the UI, markdown still goes through Glamour, and binary files get a placeholder instead of being sprayed at your terminal. `.git`, `node_modules`, and the usual build output are pruned.
+
+The tree **follows the pane you're attached to** — `cd` in your session and the browser re-roots with you, via tmux's own `#{pane_current_path}`. Press `f` to pin it in place. The mouse works: click a pane to focus it, click a row to select it, drag the border to resize the split. Scriptable too: `ccmux files list|read <project> [--host <name>]`.
+
+---
+
 ## 🩺 Manage your agents.
 
 <div align="center">
@@ -313,6 +321,15 @@ bell = true                          # ring local terminal BEL on needs_input
 - Ripgrep-backed `/` search; plain markdown on disk is the source of truth (no required cloud)
 - Browse, preview, edit-in-`$EDITOR` — ccmux reads your notes; writing them is the agent's job
 - Cross-device: `H` toggles which device's notes you're viewing (local or any tailnet peer); also via `ccmux notes list|read|search --host <name>`
+
+### 🗂️ File browser
+
+- Files tab (`8`) — every file in the project as a collapsible tree, not just markdown
+- Syntax-highlighted preview via chroma (Catppuccin Mocha, matching the UI); Glamour still renders `.md`; binary files show a placeholder, never raw bytes
+- Same pruning as Notes (`.git`, `node_modules`, `vendor`, `dist`, `build`, `target`); size caps keep a huge file from stalling the render
+- Tree follows the attached pane's working directory via tmux's `#{pane_current_path}`; `f` pins it
+- Mouse: click to focus a pane or select a row, drag the border to resize the split
+- Scriptable: `ccmux files list|read <project> [--host <name>]`
 
 ### 📲 Mobile workflow (Moshi / iOS / Android)
 

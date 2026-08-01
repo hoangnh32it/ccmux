@@ -47,6 +47,7 @@
 
 ## 8. Docs
 
-- [ ] 8.1 Update `README.md` feature list.
-- [ ] 8.2 Add `docs/02_Architecture/07_File_Browser.md`, modeled on `01_Notes_System.md`.
-- [ ] 8.3 Update `CLAUDE.md`'s component list with `internal/filebrowser`.
+- [x] 8.1 `README.md`: a narrative section ("Read the code your agent just wrote") next to the Notes one, and a "File browser" block in the full feature list.
+- [x] 8.2 `docs/02_Architecture/07_File_Browser.md`, modeled on `01_Notes_System.md` — design stance, why it is a separate tab from Notes, components, the walk, preview/binary/highlighting/size caps, cwd tracking, mouse, keys, daemon API, CLI, and the decisions locked in.
+- [x] 8.3 `CLAUDE.md`: `internal/filebrowser` in the component list, the `internal/tui` entry corrected to name all eight screens (it still listed a "Setup" screen that does not exist and omitted four that do), and the new doc in the Docs Map.
+- [x] 8.4 `docs/02_Architecture/05_HTTP_API.md`: the `GET /v1/files` endpoint, including its 400/404 semantics and the binary/truncated response shape.
