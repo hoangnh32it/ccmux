@@ -437,29 +437,37 @@ func (m *filesModel) clampCursor() {
 	}
 }
 
-// handleRight expands the folder under the cursor, drills into an
-// already-expanded one, or moves focus into the preview from a file
-// row.
+// handleRight expands the folder under the cursor, or drills into an
+// already-expanded one. On a file row it does nothing.
+//
+// That last part is deliberate and is where this diverges from
+// notes.go, which moves focus to the preview instead. In Notes most
+// rows sit inside folders, so the behaviour rarely fires. In a source
+// repo the first dozen rows are root-level files (.gitignore, go.mod,
+// README.md), so → — the first key anyone presses on a tree — silently
+// handed the keyboard to the preview pane. From there ↑↓, →, and enter
+// all went to the viewport and the tree looked broken: no folder would
+// open, no file would launch $EDITOR, and nothing said why. Only tab
+// or ← got you back, and nothing advertised either.
+//
+// The help bar already promises "→/← expand/collapse". This makes the
+// code keep that promise. Focus moves on tab or a click, which are the
+// two affordances that say so.
 func (m *filesModel) handleRight() tea.Cmd {
 	r, ok := m.selectedRow()
-	if !ok {
-		m.focus = filesFocusPreview
+	if !ok || r.Kind != filebrowser.RowFolder {
 		return nil
 	}
-	if r.Kind == filebrowser.RowFolder {
-		if !m.expanded[r.Dir] {
-			m.expanded[r.Dir] = true
-			return nil
-		}
-		// Already open — step onto its first child, which VisibleRows
-		// emits immediately after the header.
-		if m.cursor+1 < m.listLen() {
-			m.cursor++
-			return m.refreshPreview()
-		}
+	if !m.expanded[r.Dir] {
+		m.expanded[r.Dir] = true
 		return nil
 	}
-	m.focus = filesFocusPreview
+	// Already open — step onto its first child, which VisibleRows
+	// emits immediately after the header.
+	if m.cursor+1 < m.listLen() {
+		m.cursor++
+		return m.refreshPreview()
+	}
 	return nil
 }
 

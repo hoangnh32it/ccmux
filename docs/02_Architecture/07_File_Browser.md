@@ -180,14 +180,31 @@ Resizing re-lays the preview viewport *and* re-renders its content at
 the new width — without the second half the text stays wrapped for the
 old column.
 
+### Why `→` does nothing on a file
+
+`notes.go` moves focus to the preview when you press `→` on a file row,
+and Files copied that at first. It was a trap. In Notes most rows sit
+inside folders so it rarely fires; in a source repo the first dozen
+rows are root-level files, so `→` — the first key anyone presses on a
+tree — silently handed the keyboard to the viewport. From there `↑↓`
+scrolled the preview instead of moving the cursor, `→` did nothing, and
+`enter` no longer opened `$EDITOR`. The tree was dead and nothing on
+screen said why; only `tab` or `←` got you out, and neither advertised
+itself.
+
+The help bar already says `→/← expand/collapse`. The key now keeps that
+promise, and focus moves only through the two affordances that announce
+it: `tab` and a mouse click.
+`TestRightOnFileRowDoesNotStealFocus` guards the regression.
+
 ## Keys
 
 | Key | Action |
 |---|---|
 | `8` / `F8` | Open the Files tab |
 | `↑` `↓` / `j` `k` | Move within the focused pane |
-| `→` / `l` | Expand a folder, drill into an open one, or focus the preview |
-| `←` / `h` | Collapse a folder, or jump out to its parent header |
+| `→` / `l` | Expand a folder, or drill into an open one. **Nothing on a file** — see below |
+| `←` / `h` | Collapse a folder, jump out to its parent header, or return focus from the preview |
 | `tab` | Toggle focus between tree and preview |
 | `enter` / `e` | Open the selected file in `$EDITOR` (folders toggle) |
 | `p` / `space` | Switch project |

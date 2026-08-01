@@ -362,3 +362,95 @@ func TestAppRoutesPointerEventsOnlyToFiles(t *testing.T) {
 		t.Error("a click in the preview column did not focus it on the Files screen")
 	}
 }
+
+// TestRightOnFileRowDoesNotStealFocus is a regression guard for a trap
+// that made the whole screen look broken.
+//
+// → on a file row used to move focus to the preview (copied from
+// notes.go). In a source repo the first dozen rows are root-level
+// files, so the very first → anyone pressed handed the keyboard to the
+// viewport: after that ↑↓ scrolled the preview instead of moving the
+// cursor, → did nothing, and enter no longer opened $EDITOR. The tree
+// was dead and nothing on screen explained it.
+//
+// → is documented as "expand/collapse". On a file there is nothing to
+// expand, so it does nothing.
+func TestRightOnFileRowDoesNotStealFocus(t *testing.T) {
+	m := newFilesForGolden(styles.Default(), 120, 40, false)
+
+	// Row 0 of the fake tree is README.md — a file, like the first
+	// rows of any real repo.
+	r, ok := m.selectedRow()
+	if !ok || r.Kind != filebrowser.RowFile {
+		t.Fatalf("test setup: expected a file on row 0, got %+v", r)
+	}
+
+	cursorBefore := m.cursor
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRight})
+
+	if m.focus != filesFocusTree {
+		t.Fatal("→ on a file row moved focus to the preview; the tree goes dead from there")
+	}
+	if m.cursor != cursorBefore {
+		t.Errorf("→ on a file row moved the cursor to %d", m.cursor)
+	}
+
+	// And the tree still responds — the actual symptom users hit.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if m.cursor != cursorBefore+1 {
+		t.Errorf("after →, Down left the cursor at %d; the tree is unresponsive", m.cursor)
+	}
+}
+
+// TestRightOnFolderStillExpands: the fix must not break the key's
+// actual job.
+func TestRightOnFolderStillExpands(t *testing.T) {
+	m := newFilesForGolden(styles.Default(), 120, 40, false)
+
+	// Walk to the first folder header.
+	for i, r := range m.visibleRows() {
+		if r.Kind == filebrowser.RowFolder {
+			m.cursor = i
+			break
+		}
+	}
+	r, ok := m.selectedRow()
+	if !ok || r.Kind != filebrowser.RowFolder {
+		t.Fatal("test setup: no folder row found")
+	}
+	before := m.listLen()
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	if !m.expanded[r.Dir] {
+		t.Errorf("→ did not expand %q", r.Dir)
+	}
+	if m.listLen() <= before {
+		t.Errorf("expanding %q revealed no rows (%d → %d)", r.Dir, before, m.listLen())
+	}
+
+	// → again on an open folder steps into its first child.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	if m.focus != filesFocusTree {
+		t.Error("→ on an expanded folder moved focus off the tree")
+	}
+}
+
+// TestTabIsTheWayToThePreview pins the affordance the help bar names.
+func TestTabIsTheWayToThePreview(t *testing.T) {
+	m := newFilesForGolden(styles.Default(), 120, 40, false)
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if m.focus != filesFocusPreview {
+		t.Fatal("tab did not focus the preview")
+	}
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if m.focus != filesFocusTree {
+		t.Fatal("tab did not focus the tree again")
+	}
+	// ← from the preview also returns, which is the other documented exit.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	if m.focus != filesFocusTree {
+		t.Error("← from the preview did not return focus to the tree")
+	}
+}
