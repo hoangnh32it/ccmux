@@ -1,0 +1,1018 @@
+// Package setupwizard is the interactive first-run flow invoked by
+// `ccmux setup`. It walks the user through dependency installation,
+// Tailscale verification, Moshi pairing, SSH key generation, and basic
+// config — using Huh forms for the interactive bits and plain prints
+// for the status lines between them.
+//
+// Each step is idempotent: re-running the wizard skips steps that are
+// already done (with a "✓ already configured" line) and only prompts
+// for what's missing.
+package setupwizard
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"time"
+
+	"github.com/charmbracelet/huh"
+	"github.com/charmbracelet/lipgloss"
+
+	"github.com/skzv/ccmux/internal/agent"
+	"github.com/skzv/ccmux/internal/claudeauth"
+	"github.com/skzv/ccmux/internal/config"
+	"github.com/skzv/ccmux/internal/daemonservice"
+	"github.com/skzv/ccmux/internal/ghauth"
+	"github.com/skzv/ccmux/internal/moshi"
+)
+
+// Theme styles for the printed (non-Huh) status lines so the chrome
+// matches the rest of ccmux.
+var (
+	stTitle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#cba6f7")).Bold(true)
+	stOK       = lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1"))
+	stWarn     = lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af"))
+	stErr      = lipgloss.NewStyle().Foreground(lipgloss.Color("#f38ba8"))
+	stMuted    = lipgloss.NewStyle().Foreground(lipgloss.Color("#7f849c"))
+	stEmphasis = lipgloss.NewStyle().Foreground(lipgloss.Color("#cdd6f4")).Bold(true)
+)
+
+// Options tunes a wizard run.
+type Options struct {
+	// AssumeYes runs the wizard non-interactively: every prompt takes
+	// its recommended/affirmative answer without asking. Integrations
+	// that genuinely can't be scripted (Moshi QR pairing; Tailscale / gh
+	// browser auth) are reported and skipped, never auto-run. Set by
+	// `ccmux setup --yes`.
+	AssumeYes bool
+}
+
+// Run executes the full interactive wizard with default options.
+func Run(ctx context.Context, out io.Writer) error {
+	return RunWithOptions(ctx, out, Options{})
+}
+
+// RunWithOptions executes the full wizard. Each step is independent; soft
+// failures (couldn't install a brew package, user declined a step) are
+// printed but don't bail — the final summary lists them.
+//
+// `out` is where we print the conversational chrome. Tests can swap it
+// with a buffer; the binary passes os.Stdout.
+func RunWithOptions(ctx context.Context, out io.Writer, opts Options) error {
+	if out == nil {
+		out = os.Stdout
+	}
+	if opts.AssumeYes {
+		ctx = withAssumeYes(ctx)
+		fmt.Fprintln(out, stMuted.Render("Non-interactive (--yes): taking recommended answers; interactive integrations are skipped."))
+	}
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, stTitle.Render("ccmux setup wizard"))
+	fmt.Fprintln(out, stMuted.Render("Walk through deps, Tailscale, Moshi, SSH key, and config. Idempotent — safe to re-run."))
+	fmt.Fprintln(out)
+
+	// Native Windows: ccmux's dependency model (brew / tmux / mosh /
+	// caffeinate) doesn't apply. Print the WSL2 path and bail before
+	// the wizard tries to brew-install anything.
+	if runtime.GOOS == "windows" {
+		fmt.Fprintln(out, stWarn.Render("Native Windows is not currently supported."))
+		fmt.Fprintln(out, "  ccmux today runs inside WSL2 on Windows.")
+		fmt.Fprintln(out, "  1. "+stEmphasis.Render("wsl --install"))
+		fmt.Fprintln(out, "  2. Inside Ubuntu: "+stEmphasis.Render("sudo apt install tmux mosh git ripgrep"))
+		fmt.Fprintln(out, "  3. Then re-run "+stEmphasis.Render("ccmux setup")+" inside WSL.")
+		fmt.Fprintln(out, stMuted.Render("See docs/04_Guides/Windows.md for the current state of native support."))
+		return nil
+	}
+
+	steps := []struct {
+		name string
+		fn   func(context.Context, io.Writer) error
+	}{
+		{"Dependencies", stepDeps},
+		{"Tailscale", stepTailscale},
+		{"GitHub CLI", stepGitHubAuth},
+		{"Moshi (mobile push)", stepMoshi},
+		{"Local SSH key (~/.ssh/id_ed25519)", stepSSHKey},
+		{"ccmux config", stepConfig},
+		{"ccmux-mcp registration (Claude Code)", stepMCP},
+		{"Telegram bridge (phone/watch control)", stepTelegram},
+		{"ccmuxd autostart", stepDaemonService},
+	}
+
+	for i, s := range steps {
+		fmt.Fprintf(out, "%s %s\n",
+			stMuted.Render(fmt.Sprintf("[%d/%d]", i+1, len(steps))),
+			stEmphasis.Render(s.name),
+		)
+		if err := s.fn(ctx, out); err != nil {
+			fmt.Fprintf(out, "  %s %v\n\n", stErr.Render("✗"), err)
+		}
+		fmt.Fprintln(out)
+	}
+
+	fmt.Fprintln(out, stTitle.Render("Done."))
+	// Last-mile: make sure `ccmux` actually resolves on the user's PATH
+	// before printing "Next: ccmux". Otherwise a friend on a fresh Mac
+	// ends with "zsh: command not found: ccmux" after a clean install,
+	// which is the bug report that prompted this code.
+	_ = ensureCcmuxOnPath(out)
+	markSetupCompleted(out)
+	return nil
+}
+
+// markSetupCompleted records that setup finished so the launch-time
+// "ccmux isn't set up yet — run setup?" nudge stops firing. Best-effort:
+// a config write failure here must not fail an otherwise-good setup.
+func markSetupCompleted(out io.Writer) {
+	cfg, err := config.Load()
+	if err != nil {
+		return
+	}
+	if cfg.Setup.Completed {
+		return
+	}
+	cfg.Setup.Completed = true
+	if err := config.Save(cfg); err != nil {
+		fmt.Fprintln(out, stMuted.Render("  (note: couldn't record setup completion: "+err.Error()+")"))
+	}
+}
+
+// --- non-interactive (--yes) plumbing -------------------------------
+
+type wizCtxKey int
+
+const assumeYesKey wizCtxKey = iota
+
+func withAssumeYes(ctx context.Context) context.Context {
+	return context.WithValue(ctx, assumeYesKey, true)
+}
+
+// assumeYes reports whether the wizard is running non-interactively
+// (`ccmux setup --yes`).
+func assumeYes(ctx context.Context) bool {
+	v, _ := ctx.Value(assumeYesKey).(bool)
+	return v
+}
+
+// confirm runs a yes/no prompt and returns the answer. In --yes mode it
+// skips the prompt and returns autoAnswer — so steps that are safe to run
+// unattended pass true, while genuinely-interactive ones (Moshi pairing)
+// pass false to be skipped rather than auto-run. Empty affirmative /
+// negative keep Huh's defaults ("Yes" / "No").
+func confirm(ctx context.Context, autoAnswer bool, title, desc, affirmative, negative string) (bool, error) {
+	if assumeYes(ctx) {
+		return autoAnswer, nil
+	}
+	v := false
+	c := huh.NewConfirm().Title(title).Value(&v)
+	if desc != "" {
+		c = c.Description(desc)
+	}
+	if affirmative != "" {
+		c = c.Affirmative(affirmative)
+	}
+	if negative != "" {
+		c = c.Negative(negative)
+	}
+	if err := huh.NewForm(huh.NewGroup(c)).Run(); err != nil {
+		return false, err
+	}
+	return v, nil
+}
+
+// stepDeps: detect which CLI deps are installed and walk the user
+// through installing the missing ones.
+//
+// Required deps (tmux, mosh, tailscale, claude) get bulk-installed in
+// one brew invocation behind a single Confirm.
+//
+// Optional-but-prompted deps (rg) get an individual Confirm with a
+// `description` explaining what they buy you. The user can decline
+// without blocking the wizard. moshi-hook stays silent here — it's
+// handled later in stepMoshi where pairing happens.
+func stepDeps(ctx context.Context, out io.Writer) error {
+	checks := []depCheck{
+		{bin: "tmux", brew: "tmux"},
+		{bin: "mosh", brew: "mosh"},
+		{bin: "tailscale", brew: "tailscale"},
+		{
+			bin: "rg", brew: "ripgrep", optional: true, promptInstall: true,
+			rationale: "Used by the Notes screen for fast `/` search across docs/. Falls back to a slower Go scanner when missing, so this is recommended but never required.",
+		},
+		{bin: "moshi-hook", brew: "", optional: true}, // installed via tap in stepMoshi
+	}
+	missing := []string{}
+	var promptable []depCheck
+	for _, c := range checks {
+		if _, err := exec.LookPath(c.bin); err != nil {
+			tag := stErr.Render("✗ missing")
+			if c.optional {
+				tag = stWarn.Render("· not installed (optional)")
+			}
+			fmt.Fprintf(out, "  %s  %s\n", c.bin, tag)
+			switch {
+			case c.brew != "" && !c.optional:
+				missing = append(missing, c.brew)
+			case c.brew != "" && c.promptInstall:
+				promptable = append(promptable, c)
+			}
+		} else {
+			fmt.Fprintf(out, "  %s  %s\n", c.bin, stOK.Render("✓"))
+		}
+	}
+
+	// AI agents block — ccmux needs at least one. Detect each via the
+	// current process PATH plus a login-shell fallback, then point at
+	// the right install command for anything still missing.
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, stEmphasis.Render("  AI agents (need at least one)"))
+	cfg, _ := config.Load()
+	anyAgent := false
+	for _, a := range agent.All() {
+		configured := configuredAgentCommand(cfg, a.ID())
+		configuredExists := configured != "" && agent.Executable(configured)
+		if len(setupAgentCandidates(ctx, a)) == 0 && !configuredExists {
+			fmt.Fprintf(out, "  %-7s %s   %s\n",
+				a.Binary(),
+				stWarn.Render("· not installed"),
+				stMuted.Render("install: "+installHintFor(a.ID())))
+		} else {
+			fmt.Fprintf(out, "  %-7s %s   %s\n",
+				a.Binary(),
+				stOK.Render("✓"),
+				stMuted.Render("("+a.DisplayName()+")"))
+			anyAgent = true
+		}
+	}
+	if !anyAgent {
+		fmt.Fprintln(out, stWarn.Render("  ⚠ no agent installed — install one of the above before using ccmux."))
+	}
+	if changed, err := configureAgentCommands(ctx, out, &cfg); err != nil {
+		return err
+	} else if changed {
+		if err := config.Save(cfg); err != nil {
+			return err
+		}
+		p, _ := config.Path()
+		fmt.Fprintf(out, "  %s  wrote agent command selection to %s\n", stOK.Render("✓"), p)
+	}
+
+	if err := installRequired(ctx, out, missing); err != nil {
+		return err
+	}
+	return installPromptable(ctx, out, promptable)
+}
+
+func configureAgentCommands(ctx context.Context, out io.Writer, cfg *config.Config) (bool, error) {
+	changed := false
+	for _, a := range agent.All() {
+		if agentChanged, err := configureAgentCommand(ctx, out, cfg, a); err != nil {
+			return false, err
+		} else if agentChanged {
+			changed = true
+		}
+	}
+	return changed, nil
+}
+
+func configureAgentCommand(ctx context.Context, out io.Writer, cfg *config.Config, a agent.Agent) (bool, error) {
+	candidates := setupAgentCandidates(ctx, a)
+	agentCommand, shouldPrompt := defaultAgentCommandSelection(configuredAgentCommand(*cfg, a.ID()), candidates)
+	if configuredAgentCommand(*cfg, a.ID()) != "" {
+		fmt.Fprintf(out, "  %-7s %s   %s\n",
+			a.Binary(),
+			stOK.Render("configured"),
+			stMuted.Render(configuredAgentCommand(*cfg, a.ID())))
+		return false, nil
+	}
+	if agentCommand == "" {
+		return false, nil
+	}
+	if shouldPrompt && !assumeYes(ctx) {
+		opts := make([]huh.Option[string], 0, len(candidates))
+		for i, p := range candidates {
+			label := p
+			if i == 0 {
+				label += " (PATH first)"
+			}
+			opts = append(opts, huh.NewOption(label, p))
+		}
+		if err := huh.NewSelect[string]().
+			Title(a.DisplayName() + " command").
+			Description("Multiple installations are on PATH. Pick the one ccmux should use for daemon and tmux sessions.").
+			Options(opts...).
+			Value(&agentCommand).
+			Run(); err != nil {
+			return false, err
+		}
+	} else {
+		fmt.Fprintf(out, "  using %s command: %s\n", a.DisplayName(), stEmphasis.Render(agentCommand))
+	}
+	setConfiguredAgentCommand(cfg, a.ID(), agentCommand)
+	return true, nil
+}
+
+func setupAgentCandidates(ctx context.Context, a agent.Agent) []string {
+	candidates := agent.Candidates(a)
+	if p := shellResolvedAgentCandidate(ctx, a.Binary()); p != "" && agent.Executable(p) {
+		seen := false
+		for _, existing := range candidates {
+			if existing == p {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			candidates = append(candidates, p)
+		}
+	}
+	return candidates
+}
+
+func shellResolvedAgentCandidate(ctx context.Context, bin string) string {
+	shell := strings.TrimSpace(os.Getenv("SHELL"))
+	if shell == "" {
+		shell = "/bin/sh"
+	}
+	cmd := exec.CommandContext(ctx, shell, "-lc", "command -v "+agent.ShellQuote(bin))
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func defaultAgentCommandSelection(current string, candidates []string) (selection string, shouldPrompt bool) {
+	if strings.TrimSpace(current) != "" {
+		return strings.TrimSpace(current), false
+	}
+	switch len(candidates) {
+	case 0:
+		return "", false
+	case 1:
+		return candidates[0], false
+	default:
+		return candidates[0], true
+	}
+}
+
+func configuredAgentCommand(cfg config.Config, id agent.ID) string {
+	switch id {
+	case agent.IDClaude:
+		return strings.TrimSpace(cfg.Agents.Claude.Command)
+	case agent.IDCodex:
+		return strings.TrimSpace(cfg.Agents.Codex.Command)
+	case agent.IDAntigravity:
+		return strings.TrimSpace(cfg.Agents.Antigravity.Command)
+	case agent.IDCursor:
+		return strings.TrimSpace(cfg.Agents.Cursor.Command)
+	case agent.IDPi:
+		return strings.TrimSpace(cfg.Agents.Pi.Command)
+	case agent.IDGrok:
+		return strings.TrimSpace(cfg.Agents.Grok.Command)
+	default:
+		return ""
+	}
+}
+
+func setConfiguredAgentCommand(cfg *config.Config, id agent.ID, command string) {
+	command = strings.TrimSpace(command)
+	switch id {
+	case agent.IDClaude:
+		cfg.Agents.Claude.Command = command
+	case agent.IDCodex:
+		cfg.Agents.Codex.Command = command
+	case agent.IDAntigravity:
+		cfg.Agents.Antigravity.Command = command
+	case agent.IDCursor:
+		cfg.Agents.Cursor.Command = command
+	case agent.IDPi:
+		cfg.Agents.Pi.Command = command
+	case agent.IDGrok:
+		cfg.Agents.Grok.Command = command
+	}
+}
+
+// installHintFor mirrors agentInstallHint in cmd/ccmux/cmd/subcommands.go.
+// Kept separate so the wizard's wording can evolve independently of
+// doctor's. Most agents are npm-based; Antigravity uses a curl-piped
+// installer, hence the agent-typed dispatch rather than a single
+// template.
+func installHintFor(id agent.ID) string {
+	switch id {
+	case agent.IDClaude:
+		return "npm i -g @anthropic-ai/claude-code"
+	case agent.IDCodex:
+		return "npm i -g @openai/codex"
+	case agent.IDAntigravity:
+		return "curl -fsSL https://antigravity.google/cli/install.sh | bash"
+	case agent.IDCursor:
+		return "curl https://cursor.com/install -fsS | bash"
+	case agent.IDPi:
+		return "curl -fsSL https://pi.dev/install.sh | sh"
+	case agent.IDGrok:
+		return "curl -fsSL https://x.ai/cli/install.sh | bash  (or npm i -g @xai-official/grok)"
+	case agent.IDOpenCode:
+		return "curl -fsSL https://opencode.ai/install | bash  (or npm i -g opencode-ai)"
+	case agent.IDKimi:
+		return "npm i -g @moonshot/kimi-code"
+	case agent.IDDroid:
+		return "curl -fsSL https://app.factory.ai/cli | sh"
+	case agent.IDCopilot:
+		return "npm i -g @github/copilot"
+	case agent.IDQoder:
+		return "npm i -g @qoder/cli"
+	case agent.IDKilo:
+		return "npm i -g @kilocode/cli"
+	case agent.IDHermes:
+		return "uv tool install hermes-agent"
+	case agent.IDAmp:
+		return "npm i -g @sourcegraph/amp"
+	case agent.IDKiro:
+		return "see https://kiro.dev/docs/cli"
+	}
+	return ""
+}
+
+// installRequired bulk-installs the must-have brew packages behind a
+// single Confirm. Returns nil when there are none to install.
+func installRequired(ctx context.Context, out io.Writer, missing []string) error {
+	if len(missing) == 0 {
+		return nil
+	}
+	if _, err := exec.LookPath("brew"); err != nil {
+		return fmt.Errorf("brew not on PATH; install Homebrew first, then re-run")
+	}
+	install, err := confirm(ctx, true,
+		fmt.Sprintf("Install %d missing package(s) via Homebrew?", len(missing)),
+		"brew install "+strings.Join(missing, " "),
+		"Install", "Skip")
+	if err != nil {
+		return err
+	}
+	if !install {
+		fmt.Fprintln(out, stMuted.Render("  (skipped)"))
+		return nil
+	}
+	args := append([]string{"install"}, missing...)
+	cmd := exec.CommandContext(ctx, "brew", args...)
+	cmd.Stdout = out
+	cmd.Stderr = out
+	return cmd.Run()
+}
+
+// installPromptable walks the per-dep prompts for optional packages
+// the wizard recommends but doesn't mandate. One Confirm per dep so
+// the user can mix-and-match.
+func installPromptable(ctx context.Context, out io.Writer, deps []depCheck) error {
+	if len(deps) == 0 {
+		return nil
+	}
+	if _, err := exec.LookPath("brew"); err != nil {
+		fmt.Fprintln(out, stMuted.Render("  (brew not on PATH — install manually if you want these)"))
+		return nil
+	}
+	for _, c := range deps {
+		title := fmt.Sprintf("Install %s? (optional)", c.brew)
+		doInstall, err := confirm(ctx, true, title, c.rationale, "Install", "Skip")
+		if err != nil {
+			return err
+		}
+		if !doInstall {
+			fmt.Fprintf(out, "  %s  %s\n", c.bin, stMuted.Render("(skipped — install with `brew install "+c.brew+"` later)"))
+			continue
+		}
+		cmd := exec.CommandContext(ctx, "brew", "install", c.brew)
+		cmd.Stdout = out
+		cmd.Stderr = out
+		if err := cmd.Run(); err != nil {
+			fmt.Fprintf(out, "  %s install failed: %v\n", stErr.Render("✗"), err)
+		}
+	}
+	return nil
+}
+
+// printWizardDetail prints a captured diagnostic (a command's stderr, a
+// timeout note) under a wizard status line — indented and muted so it
+// reads as a sub-note rather than a second instruction.
+func printWizardDetail(out io.Writer, detail string) {
+	detail = strings.TrimSpace(detail)
+	if detail == "" {
+		return
+	}
+	for _, ln := range strings.Split(detail, "\n") {
+		fmt.Fprintln(out, stMuted.Render("    ↳ "+ln))
+	}
+}
+
+// stepGitHubAuth: gh is recommended (not required) for `ccmux new` to
+// auto-create a private GitHub repo. We never block the wizard on this
+// — just nudge.
+func stepGitHubAuth(ctx context.Context, out io.Writer) error {
+	s := ghauth.Detect(ctx)
+	switch s.State {
+	case ghauth.StateAuthed:
+		who := s.User
+		if who == "" {
+			who = "(authed)"
+		}
+		fmt.Fprintf(out, "  %s  gh authenticated as %s\n", stOK.Render("✓"), who)
+		return nil
+	case ghauth.StateMissing:
+		fmt.Fprintln(out, stWarn.Render("  gh not installed"))
+		fmt.Fprintln(out, "  "+stMuted.Render("Optional — used by `ccmux new` to create a private GitHub repo for new projects."))
+		if _, err := exec.LookPath("brew"); err == nil {
+			install, _ := confirm(ctx, true, "Install gh via Homebrew?",
+				"brew install gh — you'll still need to run `gh auth login` after.", "", "")
+			if install {
+				cmd := exec.CommandContext(ctx, "brew", "install", "gh")
+				cmd.Stdout, cmd.Stderr = out, out
+				if err := cmd.Run(); err != nil {
+					fmt.Fprintf(out, "  %s brew install gh: %v\n", stErr.Render("✗"), err)
+					return nil
+				}
+				fmt.Fprintln(out, "  "+stEmphasis.Render("Next: gh auth login")+"  (opens a browser).")
+				return nil
+			}
+		} else {
+			fmt.Fprintln(out, "  Install yourself: "+stEmphasis.Render("brew install gh")+", then "+stEmphasis.Render("gh auth login"))
+		}
+		return nil
+	case ghauth.StateNotAuthed:
+		fmt.Fprintln(out, stWarn.Render("  gh installed but not signed in"))
+		printWizardDetail(out, s.Detail)
+		fmt.Fprintln(out, "  Run "+stEmphasis.Render("gh auth login")+" in another terminal (opens a browser), then re-run "+stEmphasis.Render("ccmux setup")+" to verify.")
+		return nil
+	case ghauth.StateUnknown:
+		// We couldn't complete the check — a network timeout, or a
+		// locked keychain when running over SSH. Say so plainly and
+		// show why, instead of nagging a signed-in user to re-auth.
+		fmt.Fprintln(out, stWarn.Render("  couldn't verify gh auth"))
+		printWizardDetail(out, s.Detail)
+		fmt.Fprintln(out, "  "+stMuted.Render("If you're already signed in, nothing to do."))
+		return nil
+	}
+	return nil
+}
+
+// stepTailscale: verify the daemon is running and we're signed into a
+// tailnet.
+func stepTailscale(ctx context.Context, out io.Writer) error {
+	if _, err := exec.LookPath("tailscale"); err != nil {
+		fmt.Fprintln(out, stWarn.Render("  tailscale not on PATH — skipped"))
+		return nil
+	}
+	// Honor the wizard's context (and CLAUDE.md's exec-with-context rule)
+	// so a wedged `tailscale` CLI can't hang the setup step indefinitely.
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if out2, err := exec.CommandContext(cctx, "tailscale", "ip", "-4").Output(); err == nil && strings.TrimSpace(string(out2)) != "" {
+		ip := strings.TrimSpace(string(out2))
+		fmt.Fprintf(out, "  %s  signed in, tailnet IP: %s\n", stOK.Render("✓"), ip)
+		return nil
+	}
+	fmt.Fprintln(out, stWarn.Render("  not signed in to a tailnet"))
+	fmt.Fprintln(out, "  Run "+stEmphasis.Render("tailscale up")+" in another terminal (opens a browser to authenticate),")
+	fmt.Fprintln(out, "  then re-run "+stEmphasis.Render("ccmux setup")+" to verify.")
+	return nil
+}
+
+// stepMoshi: detect moshi-hook state and offer to install/pair/start.
+// Delegates the actual brew tap + brew install dance to the moshi
+// package; we just orchestrate consent.
+func stepMoshi(ctx context.Context, out io.Writer) error {
+	// Moshi is the mobile push path. (ccmuxd also exposes a pairing +
+	// push API — see docs/02_Architecture/05_HTTP_API.md — that a mobile
+	// client can integrate; the wizard doesn't walk through that here.)
+
+	s := moshi.Detect(ctx)
+	if s.BinaryInstalled && s.Paired && s.HooksInstalled && s.ServiceRunning {
+		fmt.Fprintf(out, "  %s  installed, paired, hooks wired, service running\n", stOK.Render("✓"))
+		return nil
+	}
+	// A blocked pairing check is not "not paired" — surface why and
+	// stop, rather than nagging the user to re-pair something we simply
+	// couldn't read (classically: a locked login keychain over SSH).
+	if s.StatusErr != nil {
+		fmt.Fprintln(out, stWarn.Render("  couldn't verify moshi-hook pairing:"))
+		printWizardDetail(out, s.StatusErr.Error())
+		fmt.Fprintln(out, "  "+stMuted.Render("Verify from a console login, or after `security unlock-keychain`."))
+		return nil
+	}
+	if s.ServiceErr != nil {
+		fmt.Fprintln(out, stWarn.Render("  couldn't verify the moshi-hook service:"))
+		printWizardDetail(out, s.ServiceErr.Error())
+	}
+	fmt.Fprintln(out, stMuted.Render("  Moshi gives you categorized push notifications on iOS/Android when"))
+	fmt.Fprintln(out, stMuted.Render("  Claude needs your input. Get the app at getmoshi.app."))
+
+	doSetup, err := confirm(ctx, false,
+		"Set up moshi-hook now?",
+		"Runs `ccmux moshi-setup` — installs, pairs, wires Claude hooks, starts service.",
+		"Set up", "Later")
+	if err != nil {
+		return err
+	}
+	if !doSetup {
+		fmt.Fprintln(out, stMuted.Render("  (skipped — run `ccmux moshi-setup` whenever you're ready)"))
+		return nil
+	}
+
+	// Install if missing.
+	if !s.BinaryInstalled {
+		if _, err := exec.LookPath("brew"); err != nil {
+			return errors.New("brew required for moshi-hook install")
+		}
+		for _, args := range moshi.InstallCmds() {
+			fmt.Fprintln(out, stMuted.Render("  → "+strings.Join(args, " ")))
+			c := exec.CommandContext(ctx, args[0], args[1:]...)
+			c.Stdout = out
+			c.Stderr = out
+			if err := c.Run(); err != nil {
+				return err
+			}
+		}
+		s = moshi.Detect(ctx)
+	}
+
+	// Pair if needed. Uses Moshi's Easy Pair flow: moshi-hook prints
+	// a QR code in the terminal and the user scans it with the Moshi
+	// iOS app to complete pairing. No token to copy.
+	//
+	// Failures are NOT silent: if `moshi-hook host setup` exits with
+	// a prerequisite error (e.g. "Remote Login is not enabled"), we
+	// loop and offer to fix it. The user can run the suggested
+	// remediation in place, open the matching System Settings pane,
+	// retry, or explicitly skip Moshi for now. We never silently move
+	// past a failed pairing.
+	if !s.Paired {
+		if err := pairMoshiInteractive(ctx, out); err != nil {
+			return err
+		}
+	}
+
+	// Install hooks + start service.
+	if !s.HooksInstalled {
+		if err := moshi.InstallHooks(ctx); err != nil {
+			return fmt.Errorf("moshi-hook install: %w", err)
+		}
+	}
+	if !s.ServiceRunning {
+		if err := moshi.StartService(ctx); err != nil {
+			fmt.Fprintf(out, "  %s start service: %v (on Linux: `moshi-hook serve` under systemd-user)\n", stWarn.Render("⚠"), err)
+		}
+	}
+	final := moshi.Detect(ctx)
+	if final.SuppressBell() {
+		fmt.Fprintln(out, stOK.Render("  ✓ moshi-hook ready"))
+	}
+	return nil
+}
+
+// pairMoshiInteractive runs `moshi-hook host setup` in a retry loop.
+// On failure it inspects the output for known prerequisite issues
+// (e.g. Remote Login disabled) and offers the user a structured
+// choice: run the suggested fix in place, open the matching System
+// Settings pane, retry, or skip Moshi for this run. Returns nil when
+// pairing succeeds OR the user explicitly skips; returns an error
+// only on unrecoverable form/UI failures.
+func pairMoshiInteractive(ctx context.Context, out io.Writer) error {
+	for {
+		fmt.Fprintln(out, "  Open the Moshi app on your phone and tap "+stEmphasis.Render("Add Host → Scan QR")+".")
+		fmt.Fprintln(out, "  A QR code will appear below — point your phone at it.")
+		fmt.Fprintln(out)
+		output, err := moshi.HostSetup(ctx)
+		if err == nil {
+			return nil
+		}
+
+		fmt.Fprintln(out)
+		fmt.Fprintf(out, "  %s  moshi-hook host setup failed: %v\n", stErr.Render("✗"), err)
+
+		fix, hasFix := moshi.DetectFix(output)
+		choice, err := promptMoshiRecovery(fix, hasFix)
+		if err != nil {
+			return err
+		}
+		switch choice {
+		case "fix":
+			fmt.Fprintf(out, "\n  → %s %s\n", fix.Command, strings.Join(fix.Args, " "))
+			fmt.Fprintln(out, stMuted.Render("    (sudo will prompt for your password)"))
+			c := exec.CommandContext(ctx, fix.Command, fix.Args...)
+			c.Stdin = os.Stdin
+			c.Stdout = out
+			c.Stderr = out
+			if runErr := c.Run(); runErr != nil {
+				fmt.Fprintf(out, "  %s fix failed: %v\n", stErr.Render("✗"), runErr)
+				fmt.Fprintln(out, stMuted.Render("  Loop again — you can pick a different option."))
+			}
+			// Loop and retry HostSetup.
+		case "settings":
+			if fix.SettingsURL != "" {
+				fmt.Fprintf(out, "  Opening %s\n", fix.SettingsURL)
+				_ = exec.CommandContext(ctx, "open", fix.SettingsURL).Run()
+			}
+			fmt.Fprintln(out, stMuted.Render("  Once you've made the change, choose 'Try again' on the next prompt."))
+			// Loop and retry HostSetup.
+		case "retry":
+			// Just loop.
+		case "skip":
+			fmt.Fprintln(out, stMuted.Render("  (skipped Moshi setup — fix the prerequisite, then re-run `ccmux moshi-setup`)"))
+			return nil
+		}
+	}
+}
+
+// promptMoshiRecovery shows the recovery menu after a failed
+// `moshi-hook host setup`. When `hasFix` is true the menu leads with
+// the targeted fix; otherwise the user only gets retry / skip.
+func promptMoshiRecovery(fix moshi.HostSetupFix, hasFix bool) (string, error) {
+	var choice string
+	opts := []huh.Option[string]{}
+	title := "Moshi setup hit a snag. How would you like to proceed?"
+	if hasFix {
+		title = "Moshi setup blocked: " + fix.Problem
+		opts = append(opts, huh.NewOption(fix.Description, "fix"))
+		if fix.SettingsURL != "" {
+			opts = append(opts, huh.NewOption("Open System Settings (GUI alternative)", "settings"))
+		}
+	}
+	opts = append(opts,
+		huh.NewOption("Try again (I'll fix it manually)", "retry"),
+		huh.NewOption("Skip Moshi for now", "skip"),
+	)
+	if err := huh.NewForm(huh.NewGroup(
+		huh.NewSelect[string]().Title(title).Options(opts...).Value(&choice),
+	)).Run(); err != nil {
+		return "", err
+	}
+	return choice, nil
+}
+
+// stepSSHKey: ensure ~/.ssh/id_ed25519 exists. This is the local
+// machine's outbound SSH key — used to push to GitHub, to ssh into
+// remote hosts (including ccmux's host setup-ssh wizard), and to
+// mosh from this machine to others. The phone's Moshi app stores
+// its OWN key in iOS Keychain and doesn't need this one.
+func stepSSHKey(ctx context.Context, out io.Writer) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	keyPath := filepath.Join(home, ".ssh", "id_ed25519")
+	if _, err := os.Stat(keyPath); err == nil {
+		fmt.Fprintf(out, "  %s  %s exists\n", stOK.Render("✓"), keyPath)
+		return nil
+	}
+
+	gen, err := confirm(ctx, true,
+		"Generate a new SSH key (ed25519)?",
+		"Writes ~/.ssh/id_ed25519 with no passphrase.",
+		"Generate", "Skip")
+	if err != nil {
+		return err
+	}
+	if !gen {
+		fmt.Fprintln(out, stMuted.Render("  (skipped)"))
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(keyPath), 0o700); err != nil {
+		return err
+	}
+	cmd := exec.Command("ssh-keygen", "-t", "ed25519", "-N", "", "-f", keyPath, "-C", "ccmux-generated")
+	cmd.Stdout = out
+	cmd.Stderr = out
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+	fmt.Fprintln(out, stOK.Render("  ✓ key generated"))
+	return nil
+}
+
+// stepConfig: confirm the projects root + default agent + subscription
+// tier and write ~/.config/ccmux/config.toml. Auto-detects the Claude
+// plan via claudeauth so we don't make the user pick from a list of
+// strings they may not have memorized.
+func stepConfig(ctx context.Context, out io.Writer) error {
+	cfg, _ := config.Load()
+	if cfg.Projects.Root == "" {
+		home, _ := os.UserHomeDir()
+		cfg.Projects.Root = filepath.Join(home, "Projects")
+	}
+
+	detectedTier := ""
+	if s, err := claudeauth.Get(ctx); err == nil {
+		detectedTier = s.Tier()
+		fmt.Fprintf(out, "  detected Claude plan: %s\n", stEmphasis.Render(detectedTier))
+	}
+	claudeTier := cfg.Subscription.TierFor("claude")
+	if (claudeTier == "" || claudeTier == "api") && detectedTier != "" && detectedTier != "api" {
+		cfg.Subscription.SetTierFor("claude", detectedTier)
+		claudeTier = detectedTier
+	}
+
+	root := cfg.Projects.Root
+	tier := claudeTier
+	if tier == "" {
+		tier = "api"
+	}
+	defaultAgent := cfg.Agents.Default
+	if defaultAgent == "" {
+		defaultAgent = "claude"
+	}
+	listenTailnet := cfg.Daemon.ListenTailnet
+	autoCheckUpdates := cfg.Update.AutoCheck
+
+	// Build the default-agent picker dynamically so users don't get
+	// offered agents ccmux cannot launch. PATH-installed agents count,
+	// and so do executable command paths already pinned in config.
+	agentOpts := []huh.Option[string]{}
+	for _, id := range defaultAgentChoices(ctx, cfg) {
+		agentOpts = append(agentOpts, huh.NewOption(defaultAgentLabel(id), string(id)))
+	}
+	agentOpts = append(agentOpts, huh.NewOption("shell (no agent — opt out)", "shell"))
+
+	// Interactive only — in --yes mode keep the pre-seeded defaults above.
+	if !assumeYes(ctx) {
+		if err := huh.NewForm(huh.NewGroup(
+			huh.NewInput().
+				Title("Projects root").
+				Description("Where `ccmux new` scaffolds projects and where Projects tab scans.").
+				Value(&root),
+			huh.NewSelect[string]().
+				Title("Default agent").
+				Description("Pre-selected in the new-project and new-session forms. You can still pick a different agent per project at scaffold time.").
+				Options(agentOpts...).
+				Value(&defaultAgent),
+			huh.NewSelect[string]().
+				Title("Claude subscription tier").
+				Description("Drives the dashboard's quota bar — auto-detected from `claude auth status`.").
+				Options(
+					huh.NewOption("api (no subscription / API-key billing)", "api"),
+					huh.NewOption("pro (~45 prompts / 5h)", "pro"),
+					huh.NewOption("max 5x (~225 prompts / 5h)", "max5x"),
+					huh.NewOption("max 20x (~900 prompts / 5h)", "max20x"),
+				).
+				Value(&tier),
+			huh.NewConfirm().
+				Title("Let other devices on your tailnet see this machine's sessions?").
+				Description("Turns on the tailnet HTTP listener (default port 7474) so other ccmux clients on your tailnet auto-discover this host. Recommended on always-on machines (Mac Mini, server, dev box). Decline on a laptop you take on the road if you'd rather keep sessions local-only.").
+				Affirmative("Yes (server mode)").
+				Negative("No (local only)").
+				Value(&listenTailnet),
+			huh.NewConfirm().
+				Title("Check for ccmux updates on launch?").
+				Description("When on, ccmux runs a quick background `git fetch` at startup and shows a dashboard banner if your checkout is behind. It never installs anything on its own — you still run `ccmux update` when you're ready.").
+				Affirmative("Yes (check + notify)").
+				Negative("No").
+				Value(&autoCheckUpdates),
+		)).Run(); err != nil {
+			return err
+		}
+	}
+
+	cfg.Projects.Root = strings.TrimSpace(root)
+	cfg.Agents.Default = strings.TrimSpace(defaultAgent)
+	cfg.Subscription.SetTierFor("claude", strings.TrimSpace(tier))
+	cfg.Daemon.ListenTailnet = listenTailnet
+	cfg.Update.AutoCheck = autoCheckUpdates
+	if err := config.Save(cfg); err != nil {
+		return err
+	}
+	p, _ := config.Path()
+	fmt.Fprintf(out, "  %s  wrote %s\n", stOK.Render("✓"), p)
+	if listenTailnet {
+		fmt.Fprintf(out, "  %s  tailnet listener enabled (port %d)\n",
+			stOK.Render("✓"), tailnetPortOrDefault(cfg.Daemon.TailnetPort))
+		fmt.Fprintln(out, stMuted.Render("  ccmuxd will pick this up on next restart — `ccmux update` to apply now."))
+	}
+	return nil
+}
+
+func defaultAgentChoices(ctx context.Context, cfg config.Config) []agent.ID {
+	available := map[agent.ID]bool{}
+	for _, a := range agent.All() {
+		if len(setupAgentCandidates(ctx, a)) > 0 {
+			available[a.ID()] = true
+		}
+		configured := configuredAgentCommand(cfg, a.ID())
+		if configured != "" && agent.Executable(configured) {
+			available[a.ID()] = true
+		}
+	}
+
+	choices := []agent.ID{agent.IDClaude}
+	for _, id := range []agent.ID{agent.IDCodex, agent.IDAntigravity, agent.IDCursor, agent.IDPi} {
+		if available[id] {
+			choices = append(choices, id)
+		}
+	}
+	return choices
+}
+
+func defaultAgentLabel(id agent.ID) string {
+	switch id {
+	case agent.IDClaude:
+		return "Claude Code"
+	case agent.IDCodex:
+		return "Codex (OpenAI)"
+	case agent.IDAntigravity:
+		return "Antigravity CLI (Google)"
+	case agent.IDCursor:
+		return "Cursor"
+	case agent.IDPi:
+		return "Pi"
+	default:
+		return string(id)
+	}
+}
+
+func tailnetPortOrDefault(p int) int {
+	if p == 0 {
+		return 7474
+	}
+	return p
+}
+
+// stepDaemonService: install (or update) the OS service that keeps
+// ccmuxd running across logouts/reboots. Works on macOS (launchd) and
+// Linux (systemd-user). Idempotent — re-running re-applies the service
+// config so any binary-path changes get picked up.
+func stepDaemonService(ctx context.Context, out io.Writer) error {
+	s := daemonservice.Probe()
+	if s.OS != "darwin" && s.OS != "linux" {
+		fmt.Fprintf(out, "  %s  auto-install not supported on %s — start ccmuxd manually with `ccmux daemon start`.\n",
+			stWarn.Render("⚠"), s.OS)
+		return nil
+	}
+	if s.ServiceEnabled && s.Running {
+		fmt.Fprintf(out, "  %s  already installed and running (%s)\n",
+			stOK.Render("✓"), s.ServicePath)
+		return nil
+	}
+	if !s.BinaryInstalled {
+		fmt.Fprintf(out, "  %s  ccmuxd binary not found next to ccmux or on PATH — reinstall ccmux\n",
+			stWarn.Render("⚠"))
+		return nil
+	}
+
+	var (
+		title, desc, doneEnabledMsg string
+	)
+	switch s.OS {
+	case "darwin":
+		title = "Install ccmuxd as a launchd agent?"
+		desc = "Writes ~/Library/LaunchAgents/dev.ccmux.daemon.plist with RunAtLoad+KeepAlive, then launchctl loads it. ccmuxd then starts at every login and restarts on crash."
+		doneEnabledMsg = "loaded via launchctl; ccmuxd will start on every login"
+	case "linux":
+		title = "Install ccmuxd as a systemd-user service?"
+		desc = "Writes ~/.config/systemd/user/ccmuxd.service with Restart=on-failure, then `systemctl --user daemon-reload && systemctl --user enable --now ccmuxd`. ccmuxd then starts at every login and restarts on crash."
+		doneEnabledMsg = "enabled under systemd-user; ccmuxd will start on every login"
+	}
+
+	doInstall, err := confirm(ctx, true, title, desc, "Install", "Skip")
+	if err != nil {
+		return err
+	}
+	if !doInstall {
+		fmt.Fprintln(out, stMuted.Render("  (skipped — run `ccmux daemon install` whenever you're ready)"))
+		return nil
+	}
+	final, err := daemonservice.Install()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "  %s  service file written to %s\n", stOK.Render("✓"), final.ServicePath)
+	if final.ServiceEnabled {
+		fmt.Fprintln(out, "  "+stOK.Render("✓")+"  "+doneEnabledMsg)
+	}
+	if final.Running {
+		fmt.Fprintln(out, "  "+stOK.Render("✓")+"  ccmuxd is running right now")
+	}
+	return nil
+}
+
+// depCheck is one row in the dependency table.
+type depCheck struct {
+	// bin is the executable name to LookPath.
+	bin string
+	// brew is the package name to install (empty when there's no
+	// brew formula — e.g. `claude` comes from Anthropic's installer).
+	brew string
+	// optional rows aren't included in the bulk required-deps
+	// install prompt.
+	optional bool
+	// promptInstall flips optional rows into "ask the user one-by-
+	// one whether to install". Used for soft-recommended deps like
+	// ripgrep that ccmux falls back gracefully without.
+	promptInstall bool
+	// rationale is the user-visible explanation for the per-dep
+	// Confirm description (only meaningful when promptInstall=true).
+	rationale string
+}

@@ -1,0 +1,40 @@
+╭──────────────────────────────────────────────────────────╮ ╭─────────────────────────────────────────────────────────╮
+│ Projects  (4)                                            │ │ ccmux   ● local                                         │
+│ agents:  • claude                                        │ │ /Users/me/repos/ccmux                                   │
+│ / ccmux                                      (2/4)       │ │                                                         │
+│                                                          │ │ session   c-ccmux                                       │
+│ on local                                                 │ │ agent     • Claude Code                                 │
+│ ▌ • ccmux   [git] [CLAUDE] [docs/]                       │ │ detected  [git] [CLAUDE] [docs/]                        │
+│   • ccmux-website   [git] [CLAUDE]                       │ │                                                         │
+│                                                          │ │ a switch agent   i full project info                    │
+│                                                          │ │                                                         │
+│                                                          │ │                                                         │
+│                                                          │ │                                                         │
+│                                                          │ │                                                         │
+│                                                          │ │                                                         │
+│                                                          │ │                                                         │
+│                                                          │ │                                                         │
+│                                                          │ │                                                         │
+│                                                          │ │                                                         │
+│                                                          │ │                                                         │
+│                                                          │ │                                                         │
+│                                                          │ │                                                         │
+│                                                          │ │                                                         │
+│                                                          │ │                                                         │
+│                                                          │ │                                                         │
+│                                                          │ │                                                         │
+│                                                          │ │                                                         │
+│                                                          │ │                                                         │
+│                                                          │ │                                                         │
+│                                                          │ │                                                         │
+│                                                          │ │                                                         │
+│                                                          │ │                                                         │
+│                                                          │ │                                                         │
+│                                                          │ │                                                         │
+│                                                          │ │                                                         │
+│                                                          │ │                                                         │
+│                                                          │ │                                                         │
+│                                                          │ │                                                         │
+│                                                          │ │                                                         │
+╰──────────────────────────────────────────────────────────╯ ╰─────────────────────────────────────────────────────────╯
+? help · q quit · enter attach · n new · i info · / filter · a switch agent · c conversations · r refresh · 1-7 screens 

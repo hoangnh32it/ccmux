@@ -1,0 +1,1350 @@
+package conversations
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/skzv/ccmux/internal/agent"
+)
+
+// writeFile is a t.Helper that creates parent dirs and writes content.
+// Tests are noisy without it because every fixture needs the same
+// boilerplate.
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir for %s: %v", path, err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// TestListClaude_ParsesTranscript covers the happy path: one
+// well-formed transcript yields a Conversation with ID, project,
+// preview, and a timestamp pulled from the embedded event (not just
+// mtime, because event time is what the user sees as "when I last
+// chatted").
+func TestListClaude_ParsesTranscript(t *testing.T) {
+	home := t.TempDir()
+	tsRecent := "2026-04-30T10:00:00.000Z"
+	tsLater := "2026-04-30T11:30:00.000Z"
+	writeFile(t,
+		filepath.Join(home, ".claude/projects/-Users-skz-Projects-foo/abc-123.jsonl"),
+		// First user prompt is the preview source. Mix in non-user
+		// events to ensure they're skipped. Later timestamp must win.
+		`{"type":"permission-mode","permissionMode":"default"}`+"\n"+
+			`{"type":"user","message":{"role":"user","content":"build the auth flow"},"timestamp":"`+tsRecent+`"}`+"\n"+
+			`{"type":"assistant","message":{"role":"assistant","content":"sure"},"timestamp":"`+tsLater+`"}`+"\n",
+	)
+
+	got, err := ListClaude(home)
+	if err != nil {
+		t.Fatalf("ListClaude: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1", len(got))
+	}
+	c := got[0]
+	if c.ID != "abc-123" {
+		t.Errorf("ID = %q, want abc-123", c.ID)
+	}
+	if c.Agent != agent.IDClaude {
+		t.Errorf("Agent = %q, want claude", c.Agent)
+	}
+	if c.Project != "/Users/skz/Projects/foo" {
+		t.Errorf("Project = %q, want /Users/skz/Projects/foo", c.Project)
+	}
+	if c.Preview != "build the auth flow" {
+		t.Errorf("Preview = %q, want %q", c.Preview, "build the auth flow")
+	}
+	// LastActivity must reflect the LATEST event, not the first.
+	want, _ := time.Parse(time.RFC3339Nano, tsLater)
+	if !c.LastActivity.Equal(want) {
+		t.Errorf("LastActivity = %v, want %v (latest event)", c.LastActivity, want)
+	}
+}
+
+// TestListClaude_MissingTree returns nil cleanly. A fresh install
+// without ~/.claude must not error — the dashboard surfaces an
+// "install hint" for that case.
+func TestListClaude_MissingTree(t *testing.T) {
+	got, err := ListClaude(t.TempDir())
+	if err != nil {
+		t.Fatalf("missing tree should not error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %d conversations, want 0", len(got))
+	}
+}
+
+// TestListClaude_HandlesArrayContent — Claude sometimes encodes the
+// user message as an array of {type, text} parts instead of a plain
+// string. The parser must handle both and produce a sensible preview.
+func TestListClaude_HandlesArrayContent(t *testing.T) {
+	home := t.TempDir()
+	writeFile(t,
+		filepath.Join(home, ".claude/projects/-Users-skz-Projects-foo/sess.jsonl"),
+		`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hello"},{"type":"text","text":"world"}]},"timestamp":"2026-04-30T10:00:00Z"}`+"\n",
+	)
+	got, _ := ListClaude(home)
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1", len(got))
+	}
+	if got[0].Preview != "hello world" {
+		t.Errorf("Preview = %q, want %q", got[0].Preview, "hello world")
+	}
+}
+
+// TestListClaude_CwdFieldOverridesDecodedPath — a project path with
+// hyphens (e.g. ~/Projects/auth-redesign) encodes to the same Claude
+// directory name as a nested path (~/Projects/auth/redesign), so the
+// decode is ambiguous. The cwd field on user events is the authoritative
+// source: when present it must win over the decoded directory name. This
+// is the fix for the "conversation ID can't be found" bug where claude
+// was launched from the wrong directory.
+func TestListClaude_CwdFieldOverridesDecodedPath(t *testing.T) {
+	home := t.TempDir()
+	// Directory name decodes to /Users/skz/Projects/auth/redesign (wrong).
+	// Transcript cwd says /Users/skz/Projects/auth-redesign (right).
+	writeFile(t,
+		filepath.Join(home, ".claude/projects/-Users-skz-Projects-auth-redesign/sess.jsonl"),
+		`{"type":"user","cwd":"/Users/skz/Projects/auth-redesign","message":{"role":"user","content":"hello"},"timestamp":"2026-04-30T10:00:00Z"}`+"\n",
+	)
+	got, err := ListClaude(home)
+	if err != nil {
+		t.Fatalf("ListClaude: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1", len(got))
+	}
+	if got[0].Project != "/Users/skz/Projects/auth-redesign" {
+		t.Errorf("Project = %q, want /Users/skz/Projects/auth-redesign (cwd from transcript)", got[0].Project)
+	}
+}
+
+// TestListClaude_MergesSubagentFragments pins the logical-conversation
+// view over Claude's scattered transcript layout. Claude may write
+// nested subagent JSONL files under
+// <project>/<parent-session>/subagents/*.jsonl; the Conversations tab
+// should show the parent session once, with preview/count/detail data
+// assembled from every fragment.
+func TestListClaude_MergesSubagentFragments(t *testing.T) {
+	home := t.TempDir()
+	projectDir := filepath.Join(home, ".claude/projects/-Users-skz-Projects-foo")
+	parentPath := filepath.Join(projectDir, "parent-1.jsonl")
+	subagentPath := filepath.Join(projectDir, "parent-1/subagents/agent-a123.jsonl")
+	writeFile(t, parentPath,
+		`{"type":"user","entrypoint":"cli","cwd":"/Users/skz/Projects/foo","message":{"role":"user","content":"parent prompt"},"timestamp":"2026-04-30T10:00:00Z"}`+"\n"+
+			`{"type":"assistant","message":{"role":"assistant","content":"parent reply"},"timestamp":"2026-04-30T10:01:00Z"}`+"\n",
+	)
+	writeFile(t, subagentPath,
+		`{"type":"assistant","message":{"role":"assistant","content":"subagent result"},"timestamp":"2026-04-30T10:02:00Z"}`+"\n",
+	)
+
+	got, err := ListClaude(home)
+	if err != nil {
+		t.Fatalf("ListClaude: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1 merged conversation: %+v", len(got), got)
+	}
+	c := got[0]
+	if c.ID != "parent-1" {
+		t.Errorf("ID = %q, want parent-1", c.ID)
+	}
+	if c.Path != parentPath {
+		t.Errorf("Path = %q, want parent transcript %q", c.Path, parentPath)
+	}
+	if !equalStringSlice(c.Paths, []string{parentPath, subagentPath}) {
+		t.Errorf("Paths = %v, want parent + subagent", c.Paths)
+	}
+	if c.Preview != "parent prompt" {
+		t.Errorf("Preview = %q, want parent prompt", c.Preview)
+	}
+	if c.Project != "/Users/skz/Projects/foo" {
+		t.Errorf("Project = %q, want cwd from parent transcript", c.Project)
+	}
+	if c.IsHeadless() {
+		t.Error("merged parent/subagent conversation should remain interactive")
+	}
+	wantLast, _ := time.Parse(time.RFC3339Nano, "2026-04-30T10:02:00Z")
+	if !c.LastActivity.Equal(wantLast) {
+		t.Errorf("LastActivity = %v, want latest fragment timestamp %v", c.LastActivity, wantLast)
+	}
+	n, err := CountMessages(c)
+	if err != nil {
+		t.Fatalf("CountMessages: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("CountMessages = %d, want 3 across parent + subagent", n)
+	}
+	msgs, err := RecentMessages(c, 2)
+	if err != nil {
+		t.Fatalf("RecentMessages: %v", err)
+	}
+	if len(msgs) != 2 || msgs[0].Content != "parent reply" || msgs[1].Content != "subagent result" {
+		t.Errorf("RecentMessages tail = %+v, want parent reply then subagent result", msgs)
+	}
+}
+
+// TestListClaude_TolerantToBadLines — a corrupt or partial JSONL line
+// must NOT break the rest of the transcript scan. We've seen these in
+// the wild (claude killed mid-write).
+func TestListClaude_TolerantToBadLines(t *testing.T) {
+	home := t.TempDir()
+	writeFile(t,
+		filepath.Join(home, ".claude/projects/-Users-skz-Projects-foo/sess.jsonl"),
+		`{"type":"permission-mode"`+"\n"+ // truncated
+			`not even json`+"\n"+
+			`{"type":"user","message":{"role":"user","content":"good prompt"},"timestamp":"2026-04-30T10:00:00Z"}`+"\n",
+	)
+	got, _ := ListClaude(home)
+	if len(got) != 1 || got[0].Preview != "good prompt" {
+		t.Errorf("bad lines should be skipped, got: %+v", got)
+	}
+}
+
+// TestListCodex_ParsesFilename — Codex's filename is the load-bearing
+// part: `rollout-<RFC3339-ish>-<uuid>.jsonl`. The UUID is the last
+// five dash-separated chunks. Without this parse, every Codex row
+// would have an empty ID and the resume button wouldn't work.
+func TestListCodex_ParsesFilename(t *testing.T) {
+	home := t.TempDir()
+	fname := "rollout-2026-05-06T13-48-09-019dff0c-4b4d-7830-af27-408791f87129.jsonl"
+	writeFile(t,
+		filepath.Join(home, ".codex/sessions/2026/05/06", fname),
+		`{"type":"session_meta","cwd":"/Users/skz/Projects/bar"}`+"\n"+
+			`{"type":"user_message","text":"refactor the parser"}`+"\n",
+	)
+	got, err := ListCodex(home)
+	if err != nil {
+		t.Fatalf("ListCodex: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1", len(got))
+	}
+	c := got[0]
+	if c.ID != "019dff0c-4b4d-7830-af27-408791f87129" {
+		t.Errorf("ID = %q, want the UUID portion", c.ID)
+	}
+	if c.Agent != agent.IDCodex {
+		t.Errorf("Agent = %q, want codex", c.Agent)
+	}
+	if c.Project != "/Users/skz/Projects/bar" {
+		t.Errorf("Project = %q, want /Users/skz/Projects/bar", c.Project)
+	}
+	if c.Preview != "refactor the parser" {
+		t.Errorf("Preview = %q, want 'refactor the parser'", c.Preview)
+	}
+}
+
+// TestListCodex_MissingTree — same fresh-install tolerance as Claude.
+func TestListCodex_MissingTree(t *testing.T) {
+	got, err := ListCodex(t.TempDir())
+	if err != nil {
+		t.Fatalf("missing tree should not error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %d, want 0", len(got))
+	}
+}
+
+func TestListCodex_MergesDuplicateRolloutIDs(t *testing.T) {
+	home := t.TempDir()
+	uuid := "019dff0c-4b4d-7830-af27-408791f87129"
+	firstPath := filepath.Join(home, ".codex/sessions/2026/05/06", "rollout-2026-05-06T13-48-09-"+uuid+".jsonl")
+	secondPath := filepath.Join(home, ".codex/sessions/2026/05/07", "rollout-2026-05-07T09-10-11-"+uuid+".jsonl")
+	writeFile(t, firstPath,
+		`{"type":"session_meta","payload":{"originator":"codex_exec"},"cwd":"/Users/skz/Projects/bar"}`+"\n"+
+			`{"type":"user_message","text":"first rollout"}`+"\n"+
+			`{"timestamp":"2026-05-06T13:48:10Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"first message"}]}}`+"\n",
+	)
+	writeFile(t, secondPath,
+		`{"type":"session_meta","payload":{"originator":"codex-tui"},"cwd":"/Users/skz/Projects/bar"}`+"\n"+
+			`{"type":"user_message","text":"second rollout"}`+"\n"+
+			`{"timestamp":"2026-05-07T09:10:12Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"second message"}]}}`+"\n",
+	)
+	firstTime := time.Date(2026, 5, 6, 13, 48, 10, 0, time.UTC)
+	secondTime := time.Date(2026, 5, 7, 9, 10, 12, 0, time.UTC)
+	_ = os.Chtimes(firstPath, firstTime, firstTime)
+	_ = os.Chtimes(secondPath, secondTime, secondTime)
+
+	got, err := ListCodex(home)
+	if err != nil {
+		t.Fatalf("ListCodex: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1 merged Codex conversation: %+v", len(got), got)
+	}
+	c := got[0]
+	if c.ID != uuid {
+		t.Errorf("ID = %q, want %s", c.ID, uuid)
+	}
+	if !equalStringSlice(c.Paths, []string{firstPath, secondPath}) {
+		t.Errorf("Paths = %v, want both rollout files", c.Paths)
+	}
+	if !c.LastActivity.Equal(secondTime) {
+		t.Errorf("LastActivity = %v, want newest rollout mtime %v", c.LastActivity, secondTime)
+	}
+	if c.IsHeadless() {
+		t.Error("merged Codex conversation should prefer interactive originator when any fragment has one")
+	}
+	msgs, err := RecentMessages(c, 2)
+	if err != nil {
+		t.Fatalf("RecentMessages: %v", err)
+	}
+	if len(msgs) != 2 || msgs[0].Content != "first message" || msgs[1].Content != "second message" {
+		t.Errorf("RecentMessages = %+v, want messages merged by timestamp", msgs)
+	}
+}
+
+func TestListCodex_UsesPayloadCwdAndTimestampedMessages(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, ".codex/sessions/2026/05/23/rollout-2026-05-23T10-00-00-00000000-0000-0000-0000-000000000004.jsonl")
+	writeFile(t, path,
+		`{"timestamp":"2026-05-23T10:00:00Z","type":"session_meta","payload":{"id":"u4","originator":"codex-tui","cwd":"/Users/skz/Projects/payload-cwd"}}`+"\n"+
+			`{"timestamp":"2026-05-23T10:01:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"ship the cursor walker"}]}}`+"\n"+
+			`{"timestamp":"2026-05-23T10:02:00Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}`+"\n",
+	)
+
+	got, err := ListCodex(home)
+	if err != nil {
+		t.Fatalf("ListCodex: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1", len(got))
+	}
+	c := got[0]
+	if c.Project != "/Users/skz/Projects/payload-cwd" {
+		t.Errorf("Project = %q, want cwd from session_meta payload", c.Project)
+	}
+	if c.Preview != "ship the cursor walker" {
+		t.Errorf("Preview = %q, want response_item user text", c.Preview)
+	}
+	wantLast, _ := time.Parse(time.RFC3339Nano, "2026-05-23T10:02:00Z")
+	if !c.LastActivity.Equal(wantLast) {
+		t.Errorf("LastActivity = %v, want latest event timestamp %v", c.LastActivity, wantLast)
+	}
+	n, err := CountMessages(c)
+	if err != nil {
+		t.Fatalf("CountMessages: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("CountMessages = %d, want user + assistant", n)
+	}
+}
+
+func TestListCursor_ParsesAgentTranscriptJSONL(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, ".cursor/projects/Users-skz-Projects-foo/agent-transcripts/cur-1/cur-1.jsonl")
+	writeFile(t, path,
+		`{"role":"user","message":{"content":[{"type":"text","text":"build cursor support"}]},"timestamp":"2026-05-24T10:00:00Z"}`+"\n"+
+			`{"role":"assistant","message":{"content":[{"type":"text","text":"working"}]},"timestamp":"2026-05-24T10:01:00Z"}`+"\n",
+	)
+
+	got, err := ListCursor(home)
+	if err != nil {
+		t.Fatalf("ListCursor: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1", len(got))
+	}
+	c := got[0]
+	if c.ID != "cur-1" {
+		t.Errorf("ID = %q, want cur-1", c.ID)
+	}
+	if c.Agent != agent.IDCursor {
+		t.Errorf("Agent = %q, want cursor", c.Agent)
+	}
+	if c.Project != "/Users/skz/Projects/foo" {
+		t.Errorf("Project = %q, want decoded Cursor project path", c.Project)
+	}
+	if c.Preview != "build cursor support" {
+		t.Errorf("Preview = %q, want first user text", c.Preview)
+	}
+	n, err := CountMessages(c)
+	if err != nil {
+		t.Fatalf("CountMessages: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("CountMessages = %d, want 2", n)
+	}
+	msgs, err := RecentMessages(c, 2)
+	if err != nil {
+		t.Fatalf("RecentMessages: %v", err)
+	}
+	if len(msgs) != 2 || msgs[0].Content != "build cursor support" || msgs[1].Content != "working" {
+		t.Errorf("RecentMessages = %+v, want cursor user then assistant", msgs)
+	}
+}
+
+// TestListPi_ParsesSessionJSONL pins pi's real on-disk format
+// (https://pi.dev/docs/latest/session-format): one JSONL file per
+// session under ~/.pi/agent/sessions/--<cwd>--/<ts>_<uuid>.jsonl,
+// where the first line is a `{"type":"session",…}` header carrying
+// the authoritative id + cwd, and `{"type":"message",…}` lines nest
+// role + content under `message`.
+func TestListPi_ParsesSessionJSONL(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, ".pi/agent/sessions/--Users-skz-Projects-foo--/20241203T140000_sess-uuid-1.jsonl")
+	// pi's real schema (bundled docs/session-format.md): `timestamp`
+	// is Unix milliseconds INSIDE the message object; content is a
+	// string or a block array; the session header carries id + cwd.
+	writeFile(t, path,
+		`{"type":"session","version":3,"id":"sess-uuid-1","timestamp":1748080800000,"cwd":"/Users/skz/Projects/foo"}`+"\n"+
+			`{"type":"message","id":"a1b2c3d4","parentId":null,"message":{"role":"user","content":"build pi support","timestamp":1748080801000}}`+"\n"+
+			`{"type":"message","id":"e5f6a7b8","parentId":"a1b2c3d4","message":{"role":"assistant","content":[{"type":"text","text":"on it"}],"timestamp":1748080860000}}`+"\n"+
+			`{"type":"compaction","id":"c9d0","timestamp":1748080920000}`+"\n",
+	)
+
+	got, err := ListPi(home)
+	if err != nil {
+		t.Fatalf("ListPi: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1", len(got))
+	}
+	c := got[0]
+	if c.ID != "sess-uuid-1" {
+		t.Errorf("ID = %q, want sess-uuid-1 (session-header id)", c.ID)
+	}
+	if c.Agent != agent.IDPi {
+		t.Errorf("Agent = %q, want pi", c.Agent)
+	}
+	if c.Project != "/Users/skz/Projects/foo" {
+		t.Errorf("Project = %q, want session-header cwd", c.Project)
+	}
+	if c.Preview != "build pi support" {
+		t.Errorf("Preview = %q, want first user text", c.Preview)
+	}
+	// compaction + session header must NOT count as turns.
+	n, err := CountMessages(c)
+	if err != nil {
+		t.Fatalf("CountMessages: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("CountMessages = %d, want 2 (user + assistant only)", n)
+	}
+	msgs, err := RecentMessages(c, 5)
+	if err != nil {
+		t.Fatalf("RecentMessages: %v", err)
+	}
+	if len(msgs) != 2 || msgs[0].Content != "build pi support" || msgs[1].Content != "on it" {
+		t.Errorf("RecentMessages = %+v, want pi user then assistant", msgs)
+	}
+}
+
+// TestListPi_FallsBackToFilenameWhenNoHeader — a session file missing
+// its header line (truncated write, older format) still yields a
+// usable row: ID from the filename's <uuid> segment, project decoded
+// from the --<cwd>-- directory name.
+func TestListPi_FallsBackToFilenameWhenNoHeader(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, ".pi/agent/sessions/--Users-skz-Projects-bar--/20241203T140000_fallback-uuid.jsonl")
+	writeFile(t, path,
+		`{"type":"message","timestamp":"2026-05-24T10:00:01Z","message":{"role":"user","content":"hi"}}`+"\n",
+	)
+	got, err := ListPi(home)
+	if err != nil {
+		t.Fatalf("ListPi: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1", len(got))
+	}
+	if got[0].ID != "fallback-uuid" {
+		t.Errorf("ID = %q, want fallback-uuid (filename uuid segment)", got[0].ID)
+	}
+	if got[0].Project != "/Users/skz/Projects/bar" {
+		t.Errorf("Project = %q, want dir-decoded /Users/skz/Projects/bar", got[0].Project)
+	}
+}
+
+// TestListPi_MissingTree — no ~/.pi at all is a clean empty result,
+// never an error (matches every other agent walker).
+func TestListPi_MissingTree(t *testing.T) {
+	got, err := ListPi(t.TempDir())
+	if err != nil {
+		t.Fatalf("ListPi on empty home: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("len = %d, want 0", len(got))
+	}
+}
+
+// TestListAntigravity_ListsPBFiles — Antigravity stores conversations
+// as opaque .pb files. We can't read them, but the filename is the
+// UUID and mtime is a useful surrogate for "last activity." The
+// Preview field stays empty by design.
+func TestListAntigravity_ListsPBFiles(t *testing.T) {
+	home := t.TempDir()
+	writeFile(t,
+		filepath.Join(home, ".gemini/antigravity-cli/conversations/9d34d057-0ba1-4e24-b610-cff3994fb631.pb"),
+		"opaque protobuf bytes",
+	)
+	// Make the file noticeably old so we can verify the mtime survives.
+	old := time.Now().Add(-24 * time.Hour)
+	_ = os.Chtimes(
+		filepath.Join(home, ".gemini/antigravity-cli/conversations/9d34d057-0ba1-4e24-b610-cff3994fb631.pb"),
+		old, old,
+	)
+
+	got, err := ListAntigravity(home)
+	if err != nil {
+		t.Fatalf("ListAntigravity: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1", len(got))
+	}
+	c := got[0]
+	if c.ID != "9d34d057-0ba1-4e24-b610-cff3994fb631" {
+		t.Errorf("ID = %q, want UUID from filename", c.ID)
+	}
+	if c.Agent != agent.IDAntigravity {
+		t.Errorf("Agent = %q, want antigravity", c.Agent)
+	}
+	if c.Preview != "" {
+		t.Errorf("Preview = %q, want empty (can't parse pb)", c.Preview)
+	}
+	// mtime must round-trip — used by All() for sort order.
+	if !c.LastActivity.Equal(old.Truncate(time.Second)) && c.LastActivity.Sub(old).Abs() > 2*time.Second {
+		t.Errorf("LastActivity = %v, want ~%v (mtime)", c.LastActivity, old)
+	}
+}
+
+func TestListAntigravity_ParsesGeminiJSONChats(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, ".gemini/tmp/abcdef1234567890/chats/session-2026-05-24T10-00-agy.json")
+	writeFile(t, path,
+		`{"sessionId":"agy-1","projectHash":"abcdef1234567890","startTime":"2026-05-24T10:00:00Z","lastUpdated":"2026-05-24T10:02:00Z","messages":[`+
+			`{"type":"user","content":"summarize this repo","timestamp":"2026-05-24T10:00:00Z"},`+
+			`{"type":"gemini","content":"summary","timestamp":"2026-05-24T10:01:00Z"}`+
+			`]}`,
+	)
+
+	got, err := ListAntigravity(home)
+	if err != nil {
+		t.Fatalf("ListAntigravity: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1", len(got))
+	}
+	c := got[0]
+	if c.ID != "agy-1" {
+		t.Errorf("ID = %q, want session ID", c.ID)
+	}
+	if c.Preview != "summarize this repo" {
+		t.Errorf("Preview = %q, want first user message", c.Preview)
+	}
+	if c.Project != "project abcdef123456" {
+		t.Errorf("Project = %q, want short project hash label", c.Project)
+	}
+	wantLast, _ := time.Parse(time.RFC3339Nano, "2026-05-24T10:02:00Z")
+	if !c.LastActivity.Equal(wantLast) {
+		t.Errorf("LastActivity = %v, want lastUpdated %v", c.LastActivity, wantLast)
+	}
+	n, err := CountMessages(c)
+	if err != nil {
+		t.Fatalf("CountMessages: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("CountMessages = %d, want 2", n)
+	}
+	msgs, err := RecentMessages(c, 2)
+	if err != nil {
+		t.Fatalf("RecentMessages: %v", err)
+	}
+	if len(msgs) != 2 || msgs[0].Content != "summarize this repo" || msgs[1].Role != "assistant" {
+		t.Errorf("RecentMessages = %+v, want Gemini JSON user + assistant", msgs)
+	}
+}
+
+// TestAll_SortsByRecency — the unified list returns most-recent first
+// across all three agents. A regression here would scatter today's
+// conversation behind yesterday's stale ones in the picker.
+func TestAll_SortsByRecency(t *testing.T) {
+	home := t.TempDir()
+	// Three transcripts with different times.
+	now := time.Now()
+	yesterday := now.Add(-24 * time.Hour)
+	lastWeek := now.Add(-7 * 24 * time.Hour)
+
+	writeFile(t,
+		filepath.Join(home, ".claude/projects/-x/old.jsonl"),
+		`{"type":"user","message":{"role":"user","content":"week-old"},"timestamp":"`+lastWeek.UTC().Format(time.RFC3339Nano)+`"}`+"\n",
+	)
+	writeFile(t,
+		filepath.Join(home, ".codex/sessions/2026/05/06/rollout-2026-05-06T13-48-09-aaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl"),
+		`{"type":"user_message","text":"yesterday"}`+"\n",
+	)
+	codexPath := filepath.Join(home, ".codex/sessions/2026/05/06/rollout-2026-05-06T13-48-09-aaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl")
+	_ = os.Chtimes(codexPath, yesterday, yesterday)
+	writeFile(t,
+		filepath.Join(home, ".gemini/antigravity-cli/conversations/now.pb"),
+		"recent",
+	)
+	// Touch to "now" explicitly so the test isn't sensitive to filesystem
+	// timestamp granularity.
+	_ = os.Chtimes(filepath.Join(home, ".gemini/antigravity-cli/conversations/now.pb"), now, now)
+
+	got, err := All(Options{HomeDir: home})
+	if err != nil {
+		t.Fatalf("All: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("len = %d, want 3 (got: %+v)", len(got), got)
+	}
+	if got[0].Agent != agent.IDAntigravity {
+		t.Errorf("[0] agent = %q, want antigravity (most recent)", got[0].Agent)
+	}
+	if got[1].Agent != agent.IDCodex {
+		t.Errorf("[1] agent = %q, want codex", got[1].Agent)
+	}
+	if got[2].Agent != agent.IDClaude {
+		t.Errorf("[2] agent = %q, want claude (oldest)", got[2].Agent)
+	}
+}
+
+// TestAll_LimitCapsResults — the dashboard's recent-conversations
+// panel passes Limit=5; the full Conversations screen passes 0. The
+// limit must apply AFTER sorting so the user gets the 5 most recent,
+// not 5 arbitrary rows.
+func TestAll_LimitCapsResults(t *testing.T) {
+	home := t.TempDir()
+	for i := 0; i < 7; i++ {
+		writeFile(t,
+			filepath.Join(home, ".gemini/antigravity-cli/conversations/", "conv"+string(rune('a'+i))+".pb"),
+			"x",
+		)
+	}
+	got, _ := All(Options{HomeDir: home, Limit: 3})
+	if len(got) != 3 {
+		t.Errorf("len = %d, want 3 (limit)", len(got))
+	}
+}
+
+// TestAll_SinceFiltersStale — Conversations older than Since are
+// dropped. Useful for the dashboard's "recent" panel (Since=24h) so
+// the user sees today's work, not last year's archived sessions.
+func TestAll_SinceFiltersStale(t *testing.T) {
+	home := t.TempDir()
+	// One recent, one ancient.
+	writeFile(t, filepath.Join(home, ".gemini/antigravity-cli/conversations/recent.pb"), "x")
+	writeFile(t, filepath.Join(home, ".gemini/antigravity-cli/conversations/ancient.pb"), "x")
+	ancient := time.Now().Add(-30 * 24 * time.Hour)
+	_ = os.Chtimes(filepath.Join(home, ".gemini/antigravity-cli/conversations/ancient.pb"), ancient, ancient)
+
+	got, _ := All(Options{HomeDir: home, Since: 7 * 24 * time.Hour})
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1 (only recent passes 7-day filter)", len(got))
+	}
+	if got[0].ID != "recent" {
+		t.Errorf("kept the wrong one: %+v", got[0])
+	}
+}
+
+// TestCountMessages_ClaudeJSONL counts user + assistant events out of
+// a Claude JSONL transcript and ignores the other event types ccmux
+// also writes (permission-mode, summary, etc.). The count powers the
+// detail pane's "messages N" row.
+func TestCountMessages_ClaudeJSONL(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "abc.jsonl")
+	writeFile(t, path, strings.Join([]string{
+		`{"type":"permission-mode","permissionMode":"default"}`,
+		`{"type":"user","message":{"role":"user","content":"a"},"timestamp":"2026-04-30T10:00:00Z"}`,
+		`{"type":"assistant","message":{"role":"assistant","content":"b"},"timestamp":"2026-04-30T10:00:01Z"}`,
+		`{"type":"user","message":{"role":"user","content":"c"},"timestamp":"2026-04-30T10:00:02Z"}`,
+		`{"type":"summary","summary":"x"}`,
+		"not-json",
+	}, "\n")+"\n")
+
+	n, err := CountMessages(Conversation{Agent: agent.IDClaude, Path: path})
+	if err != nil {
+		t.Fatalf("CountMessages: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("count = %d, want 3 (2 user + 1 assistant)", n)
+	}
+}
+
+// TestCountMessages_AntigravityZero — protobuf transcripts are opaque,
+// so we report 0 without erroring. The detail pane then knows to hide
+// the messages row for Antigravity rather than show a misleading "0".
+func TestCountMessages_AntigravityZero(t *testing.T) {
+	n, err := CountMessages(Conversation{Agent: agent.IDAntigravity, Path: "/anything.pb"})
+	if err != nil {
+		t.Fatalf("CountMessages: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("antigravity count = %d, want 0", n)
+	}
+}
+
+// TestRecentMessages_ClaudeReturnsTail — RecentMessages must return
+// the *last* N messages in chronological order. The detail-preview
+// modal relies on this to show a focused recap, not the start of the
+// conversation.
+func TestRecentMessages_ClaudeReturnsTail(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "abc.jsonl")
+	var b strings.Builder
+	for i := 0; i < 50; i++ {
+		role := "user"
+		if i%2 == 1 {
+			role = "assistant"
+		}
+		b.WriteString(`{"type":"` + role + `","message":{"role":"` + role + `","content":"msg-`)
+		b.WriteString(intToStr(i))
+		b.WriteString(`"},"timestamp":"2026-04-30T10:00:` + zeroPad2(i) + `Z"}` + "\n")
+	}
+	writeFile(t, path, b.String())
+
+	got, err := RecentMessages(Conversation{Agent: agent.IDClaude, Path: path}, 5)
+	if err != nil {
+		t.Fatalf("RecentMessages: %v", err)
+	}
+	if len(got) != 5 {
+		t.Fatalf("len = %d, want 5", len(got))
+	}
+	if got[0].Content != "msg-45" || got[4].Content != "msg-49" {
+		t.Errorf("tail mismatch: %q..%q, want msg-45..msg-49", got[0].Content, got[4].Content)
+	}
+}
+
+func TestRecentMessages_ClaudeCleansUserSkillInvocation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "abc.jsonl")
+	writeFile(t, path,
+		`{"type":"user","message":{"role":"user","content":"worktree-openspec-workflow\n/worktree-openspec-workflow help me create a spec"},"timestamp":"2026-04-30T10:00:00Z"}`+"\n"+
+			`{"type":"assistant","message":{"role":"assistant","content":"done"},"timestamp":"2026-04-30T10:00:01Z"}`+"\n",
+	)
+
+	got, err := RecentMessages(Conversation{Agent: agent.IDClaude, Path: path}, 5)
+	if err != nil {
+		t.Fatalf("RecentMessages: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2", len(got))
+	}
+	if got[0].Content != "help me create a spec" {
+		t.Errorf("first user message = %q, want cleaned prompt text", got[0].Content)
+	}
+}
+
+func intToStr(i int) string {
+	if i < 10 {
+		return string(rune('0' + i))
+	}
+	return string(rune('0'+i/10)) + string(rune('0'+i%10))
+}
+
+func zeroPad2(i int) string {
+	if i < 10 {
+		return "0" + string(rune('0'+i))
+	}
+	return string(rune('0'+i/10)) + string(rune('0'+i%10))
+}
+
+// TestResumeArgs_AgentDialects pins the per-agent CLI shape. A regression
+// here would mean clicking "resume" on a Codex row tries `codex --resume`
+// (which doesn't exist; codex uses positional `resume <id>`).
+func TestResumeArgs_AgentDialects(t *testing.T) {
+	cases := []struct {
+		agent agent.ID
+		want  []string
+	}{
+		{agent.IDClaude, []string{"claude", "--resume", "u-1"}},
+		{agent.IDCodex, []string{"codex", "resume", "u-1"}},
+		{agent.IDAntigravity, []string{"agy", "--conversation", "u-1"}},
+		{agent.IDCursor, []string{"cursor-agent", "--resume", "u-1"}},
+		{agent.ID("imaginary"), nil},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.agent), func(t *testing.T) {
+			got := Conversation{ID: "u-1", Agent: tc.agent}.ResumeArgs()
+			if !equalStringSlice(got, tc.want) {
+				t.Errorf("ResumeArgs = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResumeArgsWithCommands_ConfiguredCommands(t *testing.T) {
+	commands := agent.Commands{
+		Claude:      "/tmp/claude",
+		Codex:       "/tmp/codex",
+		Antigravity: "/tmp/agy",
+		Cursor:      "/tmp/cursor-agent",
+	}
+	tests := []struct {
+		name string
+		c    Conversation
+		want []string
+	}{
+		{name: "claude", c: Conversation{ID: "u-1", Agent: agent.IDClaude}, want: []string{"/tmp/claude", "--resume", "u-1"}},
+		{name: "codex", c: Conversation{ID: "u-1", Agent: agent.IDCodex}, want: []string{"/tmp/codex", "resume", "u-1"}},
+		{name: "antigravity", c: Conversation{ID: "u-1", Agent: agent.IDAntigravity}, want: []string{"/tmp/agy", "--conversation", "u-1"}},
+		{name: "cursor", c: Conversation{ID: "u-1", Agent: agent.IDCursor}, want: []string{"/tmp/cursor-agent", "--resume", "u-1"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.c.ResumeArgsWithCommands(commands)
+			if !equalStringSlice(got, tt.want) {
+				t.Errorf("ResumeArgsWithCommands = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func equalStringSlice(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestTruncatedPreview_CollapsesWhitespace — list rows are single-line
+// by design; a multi-paragraph user prompt should collapse to one
+// readable summary. Length cap also pinned here.
+func TestTruncatedPreview_CollapsesWhitespace(t *testing.T) {
+	in := "  hello\n\nworld\t\tthis is\n   a long  prompt  "
+	out := truncatedPreview(in)
+	if strings.Contains(out, "\n") || strings.Contains(out, "\t") {
+		t.Errorf("preview contains whitespace newlines/tabs: %q", out)
+	}
+	if !strings.HasPrefix(out, "hello world") {
+		t.Errorf("preview lost the first words: %q", out)
+	}
+}
+
+func TestTruncatedPreview_LengthCap(t *testing.T) {
+	in := strings.Repeat("a", 800)
+	out := truncatedPreview(in)
+	// Cap is in runes (display width), not bytes — the trailing "…"
+	// is a multi-byte rune so len(out) in bytes is naturally a bit
+	// higher than the rune count. The cap was bumped from 120 to 400
+	// so the detail pane has room to wrap a couple of paragraphs.
+	if got := len([]rune(out)); got > 400 {
+		t.Errorf("preview not capped: runes=%d", got)
+	}
+	if !strings.HasSuffix(out, "…") {
+		t.Errorf("long preview should be ellipsized: %q", out)
+	}
+}
+
+// TestCleanPromptText_StripsTagsAndNoiseBlocks — the helper that the
+// walker runs over the first user message should:
+//   - drop synthetic blocks (environment_context, user_instructions)
+//     entirely, so the preview reflects the user's real first prompt
+//   - strip XML-style tag delimiters from system-reminder / command
+//     wrappers but keep their inner text
+func TestCleanPromptText_StripsTagsAndNoiseBlocks(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			"pure_environment_context_is_empty",
+			"<environment_context>cwd=/foo PATH=/bar</environment_context>",
+			"",
+		},
+		{
+			"system_reminder_strips_tags_keeps_body",
+			"<system-reminder>be terse</system-reminder>",
+			"be terse",
+		},
+		{
+			"strips_known_noise_then_keeps_real_prompt",
+			"<environment_context>cwd=/foo</environment_context>\n\nplease refactor the parser",
+			"please refactor the parser",
+		},
+		{
+			"drops_leading_codex_agents_bundle_then_keeps_real_prompt",
+			"# AGENTS.md instructions for /repo\n\n<INSTRUCTIONS>\n- Prefer tests.\n</INSTRUCTIONS>\n\n<environment_context><cwd>/repo</cwd></environment_context>\n\nfix the row preview",
+			"fix the row preview",
+		},
+		{
+			"keeps_non_leading_agents_reference",
+			"please update AGENTS.md with this workflow",
+			"please update AGENTS.md with this workflow",
+		},
+		{
+			"command_message_keeps_inner",
+			"<command-name>commit</command-name> save the file",
+			"commit save the file",
+		},
+		{
+			"drops_matching_skill_header_and_slash_command",
+			"worktree-openspec-workflow\n/worktree-openspec-workflow help me create a hovercard spec",
+			"help me create a hovercard spec",
+		},
+		{
+			"drops_inline_skill_header_and_slash_command",
+			"openspec-apply-change /openspec-apply-change update the spec",
+			"update the spec",
+		},
+		{
+			"drops_skill_slash_command_without_header",
+			"/worktree-openspec-workflow help me create a hovercard spec",
+			"help me create a hovercard spec",
+		},
+		{
+			"skill_command_without_prompt_is_empty",
+			"openspec-apply-change /openspec-apply-change",
+			"",
+		},
+		{
+			"keeps_path_like_leading_slash_text",
+			"/Users/skz/Projects/foo should stay",
+			"/Users/skz/Projects/foo should stay",
+		},
+		{
+			"plain_text_passes_through",
+			"  hello world  ",
+			"hello world",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := strings.TrimSpace(strings.Join(strings.Fields(cleanPromptText(tc.in)), " "))
+			if got != tc.want {
+				t.Errorf("cleanPromptText(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDelete_RemovesClaudeTranscript — the happy path. A Claude
+// transcript under ~/.claude/projects is removed; ListClaude no
+// longer returns it afterward.
+func TestDelete_RemovesClaudeTranscript(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := filepath.Join(home, ".claude/projects/-Users-skz-Projects-foo/abc-123.jsonl")
+	writeFile(t, path,
+		`{"type":"user","message":{"role":"user","content":"hi"},"timestamp":"2026-04-30T10:00:00Z"}`+"\n")
+
+	c := Conversation{ID: "abc-123", Agent: agent.IDClaude, Path: path}
+	if err := Delete(c); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("transcript still exists after Delete: stat err = %v", err)
+	}
+	got, _ := ListClaude(home)
+	if len(got) != 0 {
+		t.Errorf("ListClaude still returns %d conversations after delete", len(got))
+	}
+}
+
+func TestDelete_RemovesMergedClaudeFragments(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	projectDir := filepath.Join(home, ".claude/projects/-Users-skz-Projects-foo")
+	parentPath := filepath.Join(projectDir, "parent-1.jsonl")
+	subagentPath := filepath.Join(projectDir, "parent-1/subagents/agent-a123.jsonl")
+	writeFile(t, parentPath,
+		`{"type":"user","message":{"role":"user","content":"hi"},"timestamp":"2026-04-30T10:00:00Z"}`+"\n",
+	)
+	writeFile(t, subagentPath,
+		`{"type":"assistant","message":{"role":"assistant","content":"done"},"timestamp":"2026-04-30T10:01:00Z"}`+"\n",
+	)
+	got, err := ListClaude(home)
+	if err != nil {
+		t.Fatalf("ListClaude: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want merged row", len(got))
+	}
+
+	if err := Delete(got[0]); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	for _, path := range []string{parentPath, subagentPath} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("%s still exists after Delete: stat err = %v", path, err)
+		}
+	}
+}
+
+// TestDelete_RemovesAntigravityPB — Antigravity transcripts are .pb
+// files under a different root; Delete must handle that agent's
+// path + extension too.
+func TestDelete_RemovesAntigravityPB(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := filepath.Join(home, ".gemini/antigravity-cli/conversations/xyz.pb")
+	writeFile(t, path, "opaque")
+
+	c := Conversation{ID: "xyz", Agent: agent.IDAntigravity, Path: path}
+	if err := Delete(c); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("pb file still exists after Delete")
+	}
+}
+
+func TestDelete_RemovesCursorTranscript(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := filepath.Join(home, ".cursor/projects/Users-skz-Projects-foo/agent-transcripts/cur-1/cur-1.jsonl")
+	writeFile(t, path, `{"role":"user","message":{"content":[{"type":"text","text":"hi"}]}}`+"\n")
+
+	c := Conversation{ID: "cur-1", Agent: agent.IDCursor, Path: path}
+	if err := Delete(c); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("cursor transcript still exists after Delete")
+	}
+}
+
+func TestDelete_RemovesAntigravityJSONChat(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := filepath.Join(home, ".gemini/tmp/abcdef/chats/session-2026-05-24T10-00-agy.json")
+	writeFile(t, path, `{"sessionId":"agy-1","messages":[]}`)
+
+	c := Conversation{ID: "agy-1", Agent: agent.IDAntigravity, Path: path}
+	if err := Delete(c); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("antigravity JSON chat still exists after Delete")
+	}
+}
+
+// TestDelete_RejectsPathOutsideRoot — the safety guard. A Conversation
+// whose Path points outside the agent's transcript root must be
+// refused, NOT deleted. This is what stops a corrupted or hand-crafted
+// Conversation from turning Delete into an arbitrary `rm`.
+func TestDelete_RejectsPathOutsideRoot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// A file the test owns, but NOT under any transcript root.
+	victim := filepath.Join(home, "important.txt")
+	writeFile(t, victim, "do not delete me")
+
+	c := Conversation{ID: "evil", Agent: agent.IDClaude, Path: victim}
+	err := Delete(c)
+	if err == nil {
+		t.Fatal("Delete accepted a path outside the transcript root")
+	}
+	if _, statErr := os.Stat(victim); statErr != nil {
+		t.Errorf("guard failed — the out-of-root file was deleted: %v", statErr)
+	}
+}
+
+// TestDelete_RejectsTraversalEscape — `..` segments must not let a
+// path climb out of the transcript root. filepath.Clean collapses
+// them before the prefix check, so an escape attempt is caught.
+func TestDelete_RejectsTraversalEscape(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	victim := filepath.Join(home, "secret.txt")
+	writeFile(t, victim, "secret")
+
+	// Path that, uncleaned, looks like it's under .claude/projects but
+	// climbs back out via `..`.
+	sneaky := filepath.Join(home, ".claude/projects", "..", "..", "secret.txt")
+	c := Conversation{ID: "x", Agent: agent.IDClaude, Path: sneaky}
+	if err := Delete(c); err == nil {
+		t.Error("Delete accepted a `..` traversal path")
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Errorf("traversal guard failed — secret.txt was deleted: %v", err)
+	}
+}
+
+// TestDelete_RejectsWrongExtension — a path under the right root but
+// with the wrong extension (e.g. a stray .txt in ~/.claude/projects)
+// is refused. Defense against deleting a non-transcript file that
+// happens to live in the tree.
+func TestDelete_RejectsWrongExtension(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	notATranscript := filepath.Join(home, ".claude/projects/-x/notes.txt")
+	writeFile(t, notATranscript, "x")
+
+	c := Conversation{ID: "x", Agent: agent.IDClaude, Path: notATranscript}
+	if err := Delete(c); err == nil {
+		t.Error("Delete accepted a non-.jsonl file under the Claude root")
+	}
+	if _, err := os.Stat(notATranscript); err != nil {
+		t.Errorf("extension guard failed — notes.txt was deleted: %v", err)
+	}
+}
+
+// TestDelete_EmptyPath — a Conversation with no Path can't be deleted;
+// Delete must error rather than attempt os.Remove("").
+func TestDelete_EmptyPath(t *testing.T) {
+	if err := Delete(Conversation{ID: "x", Agent: agent.IDClaude}); err == nil {
+		t.Error("Delete on an empty-path conversation should error")
+	}
+}
+
+// TestDelete_UnknownAgent — an unrecognized agent has no transcript
+// root, so Delete can't validate the path and must refuse.
+func TestDelete_UnknownAgent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := filepath.Join(home, "somewhere.jsonl")
+	writeFile(t, path, "x")
+	c := Conversation{ID: "x", Agent: agent.ID("imaginary"), Path: path}
+	if err := Delete(c); err == nil {
+		t.Error("Delete on an unknown agent should error")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("unknown-agent guard failed — file was deleted: %v", err)
+	}
+}
+
+// TestListClaude_CapturesEntrypoint — Claude tags every user event with
+// `entrypoint` ("cli" for interactive, "sdk-cli" for headless / SDK /
+// `claude -p`). readClaudeTranscript must surface that tag on the
+// Conversation so the filter knows what to hide.
+//
+// Three rows pinned: interactive (cli), headless (sdk-cli), and an
+// untagged transcript (e.g. an ai-title-only metadata stub) where
+// the field stays empty.
+func TestListClaude_CapturesEntrypoint(t *testing.T) {
+	home := t.TempDir()
+	writeFile(t,
+		filepath.Join(home, ".claude/projects/-Users-skz-Projects-foo/interactive.jsonl"),
+		`{"type":"user","entrypoint":"cli","message":{"role":"user","content":"hi"},"timestamp":"2026-04-30T10:00:00Z"}`+"\n",
+	)
+	writeFile(t,
+		filepath.Join(home, ".claude/projects/-Users-skz-Projects-foo/headless.jsonl"),
+		`{"type":"user","entrypoint":"sdk-cli","message":{"role":"user","content":"automated"},"timestamp":"2026-04-30T10:00:00Z"}`+"\n",
+	)
+	writeFile(t,
+		filepath.Join(home, ".claude/projects/-Users-skz-Projects-foo/titleonly.jsonl"),
+		// No user event — just an ai-title stub. Entrypoint must stay "".
+		`{"type":"ai-title","aiTitle":"some title","sessionId":"titleonly"}`+"\n",
+	)
+
+	got, err := ListClaude(home)
+	if err != nil {
+		t.Fatalf("ListClaude: %v", err)
+	}
+	byID := map[string]Conversation{}
+	for _, c := range got {
+		byID[c.ID] = c
+	}
+	cases := []struct {
+		id   string
+		want string
+	}{
+		{"interactive", "cli"},
+		{"headless", "sdk-cli"},
+		{"titleonly", ""},
+	}
+	for _, tc := range cases {
+		c, ok := byID[tc.id]
+		if !ok {
+			t.Errorf("missing conversation %q in result", tc.id)
+			continue
+		}
+		if c.Entrypoint != tc.want {
+			t.Errorf("%s: Entrypoint = %q, want %q", tc.id, c.Entrypoint, tc.want)
+		}
+	}
+}
+
+// TestListCodex_CapturesOriginator — Codex tags every rollout's first
+// `session_meta` event with `payload.originator` ("codex-tui" for the
+// interactive TUI, "codex_exec" for the headless `codex exec` run).
+// readCodexTranscript must surface that tag on the Conversation so the
+// filter knows what to hide.
+//
+// Three rows pinned: interactive (codex-tui), headless (codex_exec),
+// and a rollout missing the session_meta header (originator should
+// stay empty so the row defaults to "not headless").
+func TestListCodex_CapturesOriginator(t *testing.T) {
+	home := t.TempDir()
+	// Filenames follow `rollout-<RFC3339-ish>-<uuid>.jsonl`. UUID is
+	// the last 5 dash-segments; the parser stitches that back.
+	day := filepath.Join(home, ".codex/sessions/2026/05/23")
+	writeFile(t,
+		filepath.Join(day, "rollout-2026-05-23T10-00-00-00000000-0000-0000-0000-000000000001.jsonl"),
+		`{"timestamp":"2026-05-23T10:00:00Z","type":"session_meta","payload":{"id":"u1","originator":"codex-tui","source":"cli","cwd":"/p"}}`+"\n",
+	)
+	writeFile(t,
+		filepath.Join(day, "rollout-2026-05-23T10-00-00-00000000-0000-0000-0000-000000000002.jsonl"),
+		`{"timestamp":"2026-05-23T10:00:00Z","type":"session_meta","payload":{"id":"u2","originator":"codex_exec","source":"exec","cwd":"/p"}}`+"\n",
+	)
+	writeFile(t,
+		filepath.Join(day, "rollout-2026-05-23T10-00-00-00000000-0000-0000-0000-000000000003.jsonl"),
+		// No session_meta header — only a downstream event. Older or
+		// truncated rollouts shouldn't crash; entrypoint stays "".
+		`{"timestamp":"2026-05-23T10:00:00Z","type":"event_msg","payload":{"type":"task_started"}}`+"\n",
+	)
+
+	got, err := ListCodex(home)
+	if err != nil {
+		t.Fatalf("ListCodex: %v", err)
+	}
+	byID := map[string]Conversation{}
+	for _, c := range got {
+		byID[c.ID] = c
+	}
+	cases := []struct {
+		id   string
+		want string
+	}{
+		{"00000000-0000-0000-0000-000000000001", "codex-tui"},
+		{"00000000-0000-0000-0000-000000000002", "codex_exec"},
+		{"00000000-0000-0000-0000-000000000003", ""},
+	}
+	for _, tc := range cases {
+		c, ok := byID[tc.id]
+		if !ok {
+			t.Errorf("missing conversation %q in result (got %d rows)", tc.id, len(got))
+			continue
+		}
+		if c.Entrypoint != tc.want {
+			t.Errorf("%s: Entrypoint = %q, want %q", tc.id, c.Entrypoint, tc.want)
+		}
+	}
+}
+
+// TestConversation_IsHeadless pins the per-agent headless predicate.
+// Each agent uses a different tag value; the table cross-checks every
+// known combination plus a few sentinel "shouldn't match" cases so a
+// future Claude/Codex version that introduces a new mode surfaces here.
+func TestConversation_IsHeadless(t *testing.T) {
+	cases := []struct {
+		name  string
+		agent agent.ID
+		ep    string
+		want  bool
+	}{
+		// Claude
+		{"claude/sdk-cli", agent.IDClaude, "sdk-cli", true},
+		{"claude/cli", agent.IDClaude, "cli", false},
+		{"claude/empty", agent.IDClaude, "", false},
+		{"claude/unknown-future", agent.IDClaude, "future-mode", false},
+		// Codex
+		{"codex/codex_exec", agent.IDCodex, "codex_exec", true},
+		{"codex/codex-tui", agent.IDCodex, "codex-tui", false},
+		{"codex/empty", agent.IDCodex, "", false},
+		{"codex/unknown-future", agent.IDCodex, "codex_future", false},
+		// Cross-pollination: Claude's sdk-cli value on a Codex row
+		// should NOT match — the predicate must be agent-scoped.
+		{"codex/sdk-cli-doesnt-match", agent.IDCodex, "sdk-cli", false},
+		{"claude/codex_exec-doesnt-match", agent.IDClaude, "codex_exec", false},
+		// Antigravity: opaque transcripts, predicate is always false.
+		{"antigravity/empty", agent.IDAntigravity, "", false},
+		{"antigravity/even-with-tag", agent.IDAntigravity, "sdk-cli", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Conversation{Agent: tc.agent, Entrypoint: tc.ep}.IsHeadless()
+			if got != tc.want {
+				t.Errorf("IsHeadless(agent=%s, ep=%q) = %v, want %v", tc.agent, tc.ep, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAll_ExcludeHeadlessFiltersSDKRows — the main integration check:
+// All(Options{ExcludeHeadless: true}) drops every headless row (Claude
+// sdk-cli + Codex codex_exec) while keeping interactive runs and rows
+// for agents with no headless signal (Antigravity).
+func TestAll_ExcludeHeadlessFiltersSDKRows(t *testing.T) {
+	home := t.TempDir()
+	ts := func(min int) string {
+		return time.Date(2026, 4, 30, 10, min, 0, 0, time.UTC).Format(time.RFC3339Nano)
+	}
+	// Claude: interactive + headless.
+	writeFile(t,
+		filepath.Join(home, ".claude/projects/-x/interactive.jsonl"),
+		`{"type":"user","entrypoint":"cli","message":{"role":"user","content":"a"},"timestamp":"`+ts(3)+`"}`+"\n",
+	)
+	writeFile(t,
+		filepath.Join(home, ".claude/projects/-x/headless.jsonl"),
+		`{"type":"user","entrypoint":"sdk-cli","message":{"role":"user","content":"b"},"timestamp":"`+ts(2)+`"}`+"\n",
+	)
+	// Codex: interactive (codex-tui) + headless (codex_exec).
+	codexDay := filepath.Join(home, ".codex/sessions/2026/04/30")
+	writeFile(t,
+		filepath.Join(codexDay, "rollout-2026-04-30T10-04-00-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.jsonl"),
+		`{"timestamp":"`+ts(4)+`","type":"session_meta","payload":{"id":"cx-int","originator":"codex-tui","source":"cli","cwd":"/p"}}`+"\n",
+	)
+	writeFile(t,
+		filepath.Join(codexDay, "rollout-2026-04-30T10-05-00-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb.jsonl"),
+		`{"timestamp":"`+ts(5)+`","type":"session_meta","payload":{"id":"cx-exec","originator":"codex_exec","source":"exec","cwd":"/p"}}`+"\n",
+	)
+	// Antigravity: opaque, never filtered.
+	writeFile(t,
+		filepath.Join(home, ".gemini/antigravity-cli/conversations/agy.pb"),
+		"opaque",
+	)
+
+	all, err := All(Options{HomeDir: home})
+	if err != nil {
+		t.Fatalf("All (no filter): %v", err)
+	}
+	if len(all) != 5 {
+		t.Fatalf("baseline len = %d, want 5 (no filter should keep everything)", len(all))
+	}
+
+	filtered, err := All(Options{HomeDir: home, ExcludeHeadless: true})
+	if err != nil {
+		t.Fatalf("All (filter): %v", err)
+	}
+	// Expect: Claude interactive + Codex interactive + Antigravity = 3.
+	if len(filtered) != 3 {
+		t.Fatalf("filtered len = %d, want 3 (both headless rows dropped) — got: %+v", len(filtered), filtered)
+	}
+	for _, c := range filtered {
+		if c.IsHeadless() {
+			t.Errorf("headless row leaked through filter: %+v", c)
+		}
+	}
+	// Antigravity must still be present — IsHeadless is always false
+	// for it, so the filter is a no-op on those rows.
+	foundAgy := false
+	for _, c := range filtered {
+		if c.Agent == agent.IDAntigravity {
+			foundAgy = true
+		}
+	}
+	if !foundAgy {
+		t.Error("Antigravity row was wrongly filtered — IsHeadless is always false for that agent")
+	}
+}
+
+// TestAll_ExcludeHeadlessDefaultsToOff — backwards-compatibility pin.
+// Zero-value Options must return every row, including headless ones.
+// External callers that don't know about this flag must keep seeing
+// everything; the new "hide by default" policy lives in the TUI / CLI,
+// not the package.
+func TestAll_ExcludeHeadlessDefaultsToOff(t *testing.T) {
+	home := t.TempDir()
+	writeFile(t,
+		filepath.Join(home, ".claude/projects/-x/headless.jsonl"),
+		`{"type":"user","entrypoint":"sdk-cli","message":{"role":"user","content":"a"},"timestamp":"2026-04-30T10:00:00Z"}`+"\n",
+	)
+	got, err := All(Options{HomeDir: home})
+	if err != nil {
+		t.Fatalf("All: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1 — zero-value Options should not filter", len(got))
+	}
+	if !got[0].IsHeadless() {
+		t.Errorf("expected the headless row to be present; got %+v", got[0])
+	}
+}

@@ -1,0 +1,346 @@
+// Package tailnet discovers other Tailscale-reachable ccmuxd instances
+// so the dashboard "just sees" every device on your tailnet without the
+// user running `ccmux host add` for each one. Detection is best-effort:
+// if `tailscale` isn't installed, isn't authed, or returns no peers, we
+// surface an empty list and let the caller fall back to configured hosts.
+package tailnet
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os/exec"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/skzv/ccmux/internal/daemon"
+)
+
+// Peer is one host on the user's tailnet (or Self).
+type Peer struct {
+	// HostName is the human-friendly hostname Tailscale reports (e.g.
+	// "Sasha's Mac mini").
+	HostName string
+	// Addr is the tailnet IPv4 (e.g. "100.75.64.20"). What ccmuxd binds to.
+	Addr string
+	// DNSName is the full MagicDNS name (e.g. "mac-mini.tail-abcd.ts.net.").
+	DNSName string
+	// OS is what Tailscale reports for the peer ("macOS", "Linux",
+	// "iOS", "Android", "Windows", …). Used to decide whether
+	// installing ccmux on this peer is even meaningful — phones don't
+	// run Go binaries, so we point users at the Moshi app instead.
+	OS string
+	// Online is whether Tailscale considers the peer currently up.
+	Online bool
+	// Self marks this machine. Useful for skipping a self-probe.
+	Self bool
+	// TailscaleSSH reports whether this peer has Tailscale SSH
+	// enabled (`tailscale up --ssh` or the GUI toggle). Derived from
+	// the SSH_HostKeys array tailscaled populates in the status JSON
+	// for SSH-server-enabled peers. When true, the SSH setup wizard
+	// can be skipped entirely — Tailscale handles auth via the
+	// tailnet identity instead of `~/.ssh/authorized_keys`.
+	TailscaleSSH bool
+}
+
+// IsMobile reports whether this peer is a phone / tablet that wouldn't
+// run ccmux directly. The Moshi iOS app is the right tool for those
+// devices, so the dashboard skips them rather than nag-installing
+// ccmux on hardware that can't run it.
+func (p Peer) IsMobile() bool {
+	switch strings.ToLower(p.OS) {
+	case "ios", "ipados", "android":
+		return true
+	}
+	return false
+}
+
+// DisplayName picks the most user-friendly label for this peer. The
+// raw HostName from Tailscale is sometimes the literal string
+// "localhost" — that's the default hostname iOS Tailscale registers
+// with when the user hasn't customized it. In that case we fall back
+// to the leftmost segment of the MagicDNS name (e.g. "skzs-iphone"
+// out of "skzs-iphone.tail-abcd.ts.net."), and finally to a generic
+// OS-based label as a last resort.
+func (p Peer) DisplayName() string {
+	if h := strings.TrimSpace(p.HostName); h != "" && !strings.EqualFold(h, "localhost") {
+		return h
+	}
+	if dns := strings.TrimSpace(p.DNSName); dns != "" {
+		dns = strings.TrimSuffix(dns, ".")
+		if i := strings.Index(dns, "."); i > 0 {
+			return dns[:i]
+		}
+		return dns
+	}
+	switch strings.ToLower(p.OS) {
+	case "ios":
+		return "iPhone"
+	case "ipados":
+		return "iPad"
+	case "android":
+		return "Android phone"
+	case "macos":
+		return "Mac"
+	case "linux":
+		return "Linux box"
+	case "windows":
+		return "Windows PC"
+	}
+	return "(unnamed peer)"
+}
+
+// Peers returns every peer Tailscale knows about, plus Self. Returns an
+// empty slice (not an error) when tailscale isn't installed or hasn't
+// been authed — those are normal user states, not failures.
+func Peers(ctx context.Context) ([]Peer, error) {
+	bin, err := exec.LookPath("tailscale")
+	if err != nil {
+		return nil, nil
+	}
+	c, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(c, bin, "status", "--json").Output()
+	if err != nil {
+		// Common reasons (BackendState=NeedsLogin, tailscaled not running):
+		// we'd rather show "no peers" than block the dashboard.
+		return nil, nil
+	}
+	return parsePeers(out)
+}
+
+// parsePeers is the JSON-parsing half of Peers. Split out so tests can
+// hit it with a fixture instead of shelling to tailscale.
+func parsePeers(raw []byte) ([]Peer, error) {
+	// SSH_HostKeys is the array tailscaled populates when a peer
+	// has Tailscale SSH enabled (`tailscale up --ssh`). The wire
+	// shape is `[]string` of host-key fingerprints; presence /
+	// non-emptiness is the signal. Field name with the underscore
+	// matches the tailscale CLI JSON output verbatim.
+	var doc struct {
+		BackendState string `json:"BackendState"`
+		Self         struct {
+			HostName     string   `json:"HostName"`
+			DNSName      string   `json:"DNSName"`
+			OS           string   `json:"OS"`
+			TailscaleIPs []string `json:"TailscaleIPs"`
+			Online       bool     `json:"Online"`
+			SSHHostKeys  []string `json:"sshHostKeys,omitempty"`
+		} `json:"Self"`
+		Peer map[string]struct {
+			HostName     string   `json:"HostName"`
+			DNSName      string   `json:"DNSName"`
+			OS           string   `json:"OS"`
+			TailscaleIPs []string `json:"TailscaleIPs"`
+			Online       bool     `json:"Online"`
+			SSHHostKeys  []string `json:"sshHostKeys,omitempty"`
+		} `json:"Peer"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil, fmt.Errorf("parse tailscale status: %w", err)
+	}
+	if doc.BackendState != "" && doc.BackendState != "Running" {
+		return nil, errors.New("tailscale: " + doc.BackendState)
+	}
+	var peers []Peer
+	if len(doc.Self.TailscaleIPs) > 0 {
+		peers = append(peers, Peer{
+			HostName:     doc.Self.HostName,
+			Addr:         doc.Self.TailscaleIPs[0],
+			DNSName:      doc.Self.DNSName,
+			OS:           doc.Self.OS,
+			Online:       true,
+			Self:         true,
+			TailscaleSSH: len(doc.Self.SSHHostKeys) > 0,
+		})
+	}
+	for _, p := range doc.Peer {
+		if len(p.TailscaleIPs) == 0 {
+			continue
+		}
+		peers = append(peers, Peer{
+			HostName:     p.HostName,
+			Addr:         p.TailscaleIPs[0],
+			DNSName:      p.DNSName,
+			OS:           p.OS,
+			Online:       p.Online,
+			TailscaleSSH: len(p.SSHHostKeys) > 0,
+		})
+	}
+	return peers, nil
+}
+
+// Discovered is one tailnet peer that responded to a ccmuxd health probe.
+type Discovered struct {
+	Name    string // pretty short name (peer's HostName)
+	Address string // "ip:port" — the daemon's HTTP listener, used by daemon.RemoteClient
+	// DialHost is the bare host (no port) to use when ssh/mosh'ing
+	// into this peer. Prefers the leftmost MagicDNS segment ("sashas-
+	// mac-mini") over the tailnet IP so existing `known_hosts`
+	// entries — typically keyed on the hostname, not the IP —
+	// continue to match. Falls back to the tailnet IP when no DNS
+	// name is available.
+	DialHost string
+	Version  string // ccmuxd version reported by /v1/health
+	Sessions int
+	// TailscaleSSH is propagated from the originating Peer so the
+	// UI + the SSH setup wizard can short-circuit the password-and-
+	// key install when Tailscale already handles auth.
+	TailscaleSSH bool
+}
+
+// Scan is the full sweep result, partitioned by what the dashboard
+// wants to render for each kind of peer:
+//
+//	Reachable    — ccmuxd responded; show sessions + version + update flag
+//	NeedsInstall — non-mobile peer online but no ccmuxd reply; show install hint
+//	Mobile       — phone / iPad / Android; show "via Moshi app" hint
+//
+// Self is skipped (the local Unix-socket path handles it). Offline
+// peers are dropped entirely from all three lists.
+type Scan struct {
+	Reachable    []Discovered
+	NeedsInstall []Peer
+	Mobile       []Peer
+}
+
+// ScanTailnet runs one sweep and returns every actionable peer.
+// Mobile peers are NOT probed (they don't run ccmuxd anyway) but they
+// ARE surfaced so the dashboard can show that they're on the tailnet
+// and remind the user to connect via Moshi.
+//
+// `port` is the daemon.tailnet_port setting (default 7474 if 0).
+func ScanTailnet(ctx context.Context, port int) (Scan, error) {
+	if port == 0 {
+		port = 7474
+	}
+	peers, err := Peers(ctx)
+	if err != nil {
+		return Scan{}, err
+	}
+	if len(peers) == 0 {
+		return Scan{}, nil
+	}
+	type result struct {
+		peer Peer
+		d    Discovered
+		ok   bool
+	}
+	results := make(chan result, len(peers))
+	var wg sync.WaitGroup
+	var scan Scan
+	for _, p := range peers {
+		if p.Self || !p.Online || p.Addr == "" {
+			continue
+		}
+		if p.IsMobile() {
+			// Phones / iPads — no ccmuxd to probe. Surface as-is so
+			// the dashboard can render the "via Moshi app" hint.
+			scan.Mobile = append(scan.Mobile, p)
+			continue
+		}
+		wg.Add(1)
+		go func(p Peer) {
+			defer wg.Done()
+			addr := fmt.Sprintf("%s:%d", p.Addr, port)
+			info, perr := probeOne(ctx, addr)
+			if perr != nil {
+				results <- result{peer: p, ok: false}
+				return
+			}
+			results <- result{ok: true, d: Discovered{
+				Name:         shortName(p.DisplayName()),
+				Address:      addr,
+				DialHost:     dialHostFor(p),
+				Version:      info.Version,
+				Sessions:     info.Sessions,
+				TailscaleSSH: p.TailscaleSSH,
+			}}
+		}(p)
+	}
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	for r := range results {
+		if r.ok {
+			scan.Reachable = append(scan.Reachable, r.d)
+		} else {
+			scan.NeedsInstall = append(scan.NeedsInstall, r.peer)
+		}
+	}
+	return scan, nil
+}
+
+// Discover is the back-compat shorthand for ScanTailnet's Reachable
+// list. New callers should use ScanTailnet so they can also show the
+// non-ccmuxd peers (typically other Macs / Linux boxes on your
+// tailnet that haven't installed ccmux yet).
+func Discover(ctx context.Context, port int) ([]Discovered, error) {
+	scan, err := ScanTailnet(ctx, port)
+	if err != nil {
+		return nil, err
+	}
+	return scan.Reachable, nil
+}
+
+// probeOne is the cheap "is there a ccmuxd here" check. 1-second hard
+// timeout so a slow host can't stall the dashboard.
+func probeOne(ctx context.Context, addr string) (daemon.HealthInfo, error) {
+	c, cancel := context.WithTimeout(ctx, 1*time.Second)
+	defer cancel()
+	cli := daemon.RemoteClient(addr)
+	return cli.Health(c)
+}
+
+// dialHostFor picks the best target string for `ssh`/`mosh <host>`.
+// Tailnet IPs work, but most users' known_hosts entries are keyed on
+// the MagicDNS short name, so dialing by name matches the existing
+// trust state. Order of preference:
+//
+//  1. Leftmost segment of DNSName when present
+//     ("sashas-mac-mini" from "sashas-mac-mini.tail-abcd.ts.net.")
+//  2. HostName when it isn't the iOS-default "localhost" placeholder
+//  3. Tailnet IP (Addr) as a last resort
+func dialHostFor(p Peer) string {
+	if dns := strings.TrimSpace(p.DNSName); dns != "" {
+		dns = strings.TrimSuffix(dns, ".")
+		if i := strings.Index(dns, "."); i > 0 {
+			return dns[:i]
+		}
+		return dns
+	}
+	if h := strings.TrimSpace(p.HostName); h != "" && !strings.EqualFold(h, "localhost") {
+		return h
+	}
+	return p.Addr
+}
+
+// shortName turns "Sasha's Mac mini" into "mac-mini" — readable, no
+// spaces or apostrophes that'd choke a tmux session name.
+func shortName(s string) string {
+	out := make([]rune, 0, len(s))
+	prevDash := false
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			out = append(out, r)
+			prevDash = false
+		case r >= 'A' && r <= 'Z':
+			out = append(out, r+32)
+			prevDash = false
+		case r == ' ' || r == '-' || r == '_':
+			if len(out) > 0 && !prevDash {
+				out = append(out, '-')
+				prevDash = true
+			}
+		}
+	}
+	for len(out) > 0 && out[len(out)-1] == '-' {
+		out = out[:len(out)-1]
+	}
+	return string(out)
+}

@@ -1,0 +1,49 @@
+# Build artifacts (anchored to repo root so cmd/ccmux and cmd/ccmuxd
+# directories are NOT ignored — only top-level binaries are)
+bin/
+dist/
+/ccmux
+/ccmuxd
+/ccmux-mcp
+*.test
+*.out
+
+# Go
+vendor/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local state
+.env
+.env.local
+*.log
+*.db
+*.sqlite
+*.sqlite3
+
+# Agent / editor tooling state — local, never committed.
+.agent/
+.antigravitycli/
+.claude/
+.codex/
+.obsidian/
+.playwright-mcp/
+
+# Maintainer scratchpad — never published.
+MAINTAINER_NOTES.md
+
+# ccmux-stress reports (auto-generated, machine-specific).
+docs/03_Agent_Logs/stress-*.md
+
+# cuj07 demo GIF — the Network screen lists live Tailscale peer names/IPs.
+# Kept out of the repo until render.sh can mask the tailnet. The tape
+# (docs/vhs/cuj07_multi_machine.tape) stays so it can be re-rendered later.
+docs/vhs/out/cuj07_multi_machine.gif

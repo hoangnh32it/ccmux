@@ -1,0 +1,527 @@
+package tui
+
+import (
+	"time"
+
+	"github.com/skzv/ccmux/internal/agent"
+	"github.com/skzv/ccmux/internal/claudeusage"
+	"github.com/skzv/ccmux/internal/conversations"
+	"github.com/skzv/ccmux/internal/daemon"
+	"github.com/skzv/ccmux/internal/notes"
+	"github.com/skzv/ccmux/internal/project"
+	"github.com/skzv/ccmux/internal/selfupdate"
+	"github.com/skzv/ccmux/internal/sshsetup"
+	"github.com/skzv/ccmux/internal/usage"
+)
+
+// sessionsLoadedMsg is delivered when a fresh dashboard refresh completes.
+// Carries sessions from every reachable host (local + configured remotes).
+type sessionsLoadedMsg struct {
+	Sessions []daemon.SessionState
+	Hosts    []hostStatus
+	Err      error
+	At       time.Time
+}
+
+// projectsLoadedMsg carries discovered projects under the configured root.
+type projectsLoadedMsg struct {
+	Projects []project.Project
+	Err      error
+}
+
+// openSSHWizardMsg asks the App to open the SSH setup wizard for a
+// specific target. Producers: the Network screen's 's' key, the
+// post-attach-failure auto-probe, future entry points. The resume
+// payload is opaque to the App until the wizard completes — at
+// which point the App reads it to decide whether to retry an
+// attach that triggered the wizard.
+type openSSHWizardMsg struct {
+	target sshsetup.Target
+	resume any
+}
+
+// hostStatus is one row in the host-health pings table.
+type hostStatus struct {
+	Name string
+	// Local marks the row representing this machine. The Devices
+	// panel renders it with a small "(this device)" tag so the user
+	// can tell at a glance which row is which.
+	Local     bool
+	Address   string
+	OK        bool
+	Sessions  int
+	SleepMode string
+	Err       error
+	// Discovered is true when this row came from tailnet auto-discovery
+	// rather than the user's explicit `ccmux host add`. The dashboard
+	// uses it to render a subtle "discovered" tag so the user knows
+	// they didn't have to configure it.
+	Discovered bool
+	// DialHost is the bare hostname (no port) the attach path should
+	// hand to ssh/mosh — typically a MagicDNS short name for discovered
+	// peers or the configured address for explicit hosts.
+	DialHost string
+	// User is the ssh/mosh login user for this host. Empty means the
+	// client's own username. Populated for explicit cfg.Hosts entries
+	// that have a `user` field set; always empty for discovered peers.
+	User string
+	// Mosh signals that the user prefers mosh over ssh for this host.
+	// Only set for explicit cfg.Hosts entries with `mosh = true`.
+	Mosh bool
+	// Version is the remote ccmuxd's reported version string from
+	// /v1/health. Empty for hosts we couldn't reach. The dashboard
+	// compares against the local build to flag "update available".
+	Version string
+	// NeedsInstall flags a tailnet peer that didn't respond to the
+	// /v1/health probe — typically another Mac or Linux box on the
+	// tailnet where the user hasn't installed ccmux yet. The Devices
+	// panel renders these with a "ccmux not installed / running" hint
+	// instead of session counts.
+	NeedsInstall bool
+	// Mobile flags a phone / iPad / Android peer on the tailnet. We
+	// surface these in the Devices panel so the user sees that the
+	// device is reachable, but with a "connect via Moshi app" hint
+	// instead of session counts (the Moshi app handles the picker).
+	Mobile bool
+	// OS is what Tailscale reports for this peer ("macOS", "Linux",
+	// "iOS", "iPadOS", "Android", …). Populated for NeedsInstall and
+	// Mobile rows so the hint can be platform-aware.
+	OS string
+	// SSHPort is the port the remote's sshd listens on. 0 means
+	// "default" — the resolver falls back to 22. Populated for
+	// configured cfg.Hosts rows that set ssh_port; auto-discovered
+	// peers leave it 0 and default-to-22 at the dial site.
+	SSHPort int
+	// TailscaleSSH is true when the remote has Tailscale SSH
+	// enabled (per `tailscale status --json`). When set, the SSH
+	// setup wizard short-circuits — Tailscale handles auth, no
+	// key install needed. Populated from the tailnet scan for
+	// auto-discovered peers; left false for configured cfg.Hosts
+	// rows (we don't probe their TS-SSH state because that'd cost
+	// a `tailscale status` shell-out per refresh).
+	TailscaleSSH bool
+	// Source identifies where this row came from. One of "local",
+	// "configured", "discovered", "mobile". Drives the Network
+	// screen's four source-grouped sub-sections. The redundancy with
+	// Local/Discovered/Mobile is intentional: Source is the single
+	// field renderers switch on, while the booleans keep their
+	// existing semantics (Local=this machine, Discovered=came from
+	// the tailnet scan, Mobile=Moshi peer).
+	Source string
+	// SSHVerified is true when key-based SSH auth has been confirmed
+	// for this peer (the peer is in known_hosts and pubkey auth
+	// works). Renderers use it to surface the `[SSH ✓]` chip. Left
+	// false (and the chip omitted) when unknown — we don't probe
+	// every host on every refresh because that'd cost a shell-out
+	// per peer per tick.
+	SSHVerified bool
+	// LastProbe is the wall-clock time of the most recent refresh
+	// that touched this row. Drives the "last probe" line in the
+	// `i` host-detail overlay. Zero when never probed.
+	LastProbe time.Time
+	// ProbeInFlight is true while a refresh is actively probing this
+	// peer (between the spawn and the result landing). Drives the
+	// per-row spinner that replaces the chip column until the probe
+	// settles. Set during the App's refresh loop, cleared as soon as
+	// the loop produces a final hostStatus value.
+	ProbeInFlight bool
+}
+
+// tickMsg is the periodic dashboard refresh trigger.
+type tickMsg struct{ At time.Time }
+
+// toastMsg displays a one-line transient notification in the status bar.
+type toastMsg struct {
+	Text  string
+	Kind  toastKind
+	Until time.Time
+}
+
+// toastEntry is a frozen snapshot of a past toast, kept in a small ring
+// in the App so the help overlay can replay recent activity.
+type toastEntry struct {
+	At   time.Time
+	Kind toastKind
+	Text string
+}
+
+type toastKind int
+
+const (
+	toastInfo toastKind = iota
+	toastSuccess
+	toastWarning
+	toastError
+)
+
+// New-project flow messages.
+
+// newProjectSubmitMsg is emitted by the modal form when the user confirms.
+// Host/DialHost/Address are zero/empty for the local case; for a remote
+// pick, the form fills them from the App's hostStatus slice and the
+// dispatcher routes via daemon.Client.NewProject().
+type newProjectSubmitMsg struct {
+	Name string
+
+	// Host is the display name of the target device ("local",
+	// "mac-mini", …). Empty / "local" means create on this machine.
+	Host string
+
+	// Address is the http "host:port" of the remote ccmuxd (used to
+	// build a daemon.RemoteClient). Empty for local.
+	Address string
+
+	// DialHost is the bare hostname for the ssh-attach step after the
+	// remote creates the project. Typically the MagicDNS short name so
+	// known_hosts matches. Empty for local.
+	DialHost string
+
+	// Agent is the AI agent the user picked in the form's agent row
+	// (claude / codex / antigravity). Empty defaults to claude downstream.
+	// Carried through daemon.NewProjectRequest so the remote honors it.
+	Agent agent.ID
+}
+
+// projectAgentSwitchedMsg fires after a successful "a" press on the
+// Projects screen — the in-memory project list needs a refresh so the
+// detail pane reflects the new agent without waiting for the next
+// poll tick. Index is the projectsModel cursor at the time of switch.
+type projectAgentSwitchedMsg struct {
+	Path  string
+	Agent agent.ID
+}
+
+// newProjectCancelMsg is emitted by the modal form when the user hits Esc.
+type newProjectCancelMsg struct{}
+
+// projectSessionReadyMsg is emitted after a new project's directory is
+// created and its session started; triggers the actual tmux-attach via
+// tea.ExecProcess. Project is the human-readable label passed to
+// tmuxchrome.Apply so the attached status bar reads "ccmux | <project>"
+// rather than the raw session name.
+type projectSessionReadyMsg struct {
+	Session string
+	Project string
+}
+
+// remoteSessionStartedMsg fires after `ccmuxd` on a remote host
+// returns success from POST /v1/sessions. SessionName is what tmux
+// labeled the session on the remote (c-<basename>); DialHost is the
+// ssh-target string we should use to attach. The App responds by
+// suspending Bubble Tea and exec'ing into ssh.
+type remoteSessionStartedMsg struct {
+	SessionName string
+	DialHost    string
+	User        string // login user; empty → client's own username
+	SSHPort     int    // sshd port; 0 → default 22 at the dial site
+	Mosh        bool   // prefer mosh over ssh
+}
+
+// New-bare-session flow (Sessions tab `n` key). Mirrors the new-
+// project flow but doesn't carry a project name or description —
+// just a session in this dir on this device, running the picked
+// agent (or $SHELL when Agent is "").
+
+// newBareSessionSubmitMsg is emitted by the Sessions tab's form
+// when the user confirms. Host/Address/DialHost are zero for the
+// local case; for a remote pick, the form fills them from the
+// App's hostStatus slice.
+type newBareSessionSubmitMsg struct {
+	Name string // tmux session name; empty → server picks
+	Path string // working directory; empty → daemon's default_dir → $HOME
+
+	Host     string // "local" or peer display name
+	Address  string // ccmuxd http "host:port" for remote daemon
+	DialHost string // bare hostname/IP for ssh/mosh attach
+	User     string // login user; empty → client's own username
+	SSHPort  int    // sshd port on the remote; 0 → default 22
+	Mosh     bool   // prefer mosh over ssh for this host
+
+	// Agent is the AI agent the form's picker selected. Empty means
+	// "shell — no agent", the picker's explicit no-agent row.
+	Agent agent.ID
+}
+
+// newBareSessionCancelMsg is emitted by the form on Esc.
+type newBareSessionCancelMsg struct{}
+
+// bareSessionReadyMsg is the local-flow completion message. Carries
+// the new tmux session name so the App can route attach via
+// localAttachCmd.
+type bareSessionReadyMsg struct {
+	Session string
+}
+
+// sessionKilledMsg signals that a Sessions-screen `x` kill completed; the
+// app responds with an immediate refresh.
+type sessionKilledMsg struct {
+	Name string
+	Err  error
+}
+
+// Rename flow (Sessions screen `R` key).
+
+// renameSessionSubmitMsg is emitted by renameFormModel on Enter.
+type renameSessionSubmitMsg struct {
+	OldName string
+	NewName string
+}
+
+// renameSessionCancelMsg is emitted by renameFormModel on Esc.
+type renameSessionCancelMsg struct{}
+
+// sessionRenamedMsg is emitted after tmux.Rename completes.
+type sessionRenamedMsg struct {
+	OldName string
+	NewName string
+	Err     error
+}
+
+// Notes screen messages.
+
+// openEditorMsg asks the app to suspend the TUI and run $EDITOR on `Path`.
+// Emitted by the Notes screen (after creating a new file) and by the
+// Settings screen (for multi-line config values). After tea.ExecProcess
+// returns, the App routes a follow-up reload message based on `Source`
+// so the right screen refreshes its state.
+type openEditorMsg struct {
+	Editor string
+	Path   string
+	// Source identifies which screen wants the reload. "notes" by
+	// default (back-compat); "settings" triggers configReloadMsg.
+	Source string
+}
+
+// notesReloadMsg asks the Notes screen to re-list and re-render after a
+// file was created/edited externally.
+type notesReloadMsg struct{}
+
+// New-note flow (Notes tab `n` key).
+
+// newNoteSubmitMsg is emitted by newNoteFormModel on Enter. Filename
+// is the chosen path relative to the project root (with a guaranteed
+// `.md` suffix); Title is the optional H1 text — empty means the
+// file is created with no leading heading.
+type newNoteSubmitMsg struct {
+	Filename string
+	Title    string
+}
+
+// newNoteCancelMsg is emitted by newNoteFormModel on Esc.
+type newNoteCancelMsg struct{}
+
+// noteInfoOpenMsg asks the app to open the note-info overlay for
+// the currently-selected note. The notes screen's selection cursor
+// determines which note's metadata is rendered.
+type noteInfoOpenMsg struct{}
+
+// notesEntriesLoadedMsg carries the result of an async note listing —
+// either a local Vault.List walk or a remote daemon.Client.Notes call.
+// Host + Path together identify the project so the handler can discard
+// stale results when the user has switched device/project while the
+// fetch was in flight. Err is non-empty when a remote device couldn't
+// be reached (so the screen shows an explicit error rather than silently
+// falling back to local notes).
+type notesEntriesLoadedMsg struct {
+	Host    string // project-host label ("local" or remote host name)
+	Path    string
+	Entries []notes.Entry
+	Err     string
+}
+
+// notesPreviewLoadedMsg carries the body of a remote note fetched via
+// daemon.Client.NoteContent. Local previews are read synchronously, so
+// this message only ever originates from a remote device. Host/Path/Rel
+// identify the selection so a stale fetch (cursor already moved) is
+// dropped.
+type notesPreviewLoadedMsg struct {
+	Host    string
+	Path    string
+	Rel     string
+	Content string
+	Err     string
+}
+
+// configReloadMsg asks the App to re-read ~/.config/ccmux/config.toml
+// and push the new shape into every screen that holds a cached copy.
+// Emitted after the Settings screen's "edit in $EDITOR" flow returns.
+type configReloadMsg struct{}
+
+// notesSearchResultMsg carries the result set from a Vault.Search
+// invocation back to the Notes screen. Query echoes the user's
+// input so the rendering can re-print it as a header.
+type notesSearchResultMsg struct {
+	Query string
+	Hits  []notes.SearchHit
+	Err   string
+}
+
+// usageTickMsg fires periodically to refresh the dashboard's usage panel.
+// Slower cadence than the session tick because walking the transcript
+// tree is more expensive.
+type usageTickMsg struct{ At time.Time }
+
+// usageLoadedMsg carries the result of a per-agent usage refresh.
+// `Agg` is the rich Claude aggregate that drives the dashboard's
+// main usage panel (cache breakdown, 5h quota bar, top projects).
+// `Codex` and `Antigravity` are the cross-agent summaries; today
+// they're always zero-valued (stub walkers) until those agents grow
+// real transcript parsers. `CcusageBlock` is the current billing
+// block from `npx ccusage blocks --json`; nil when ccusage isn't
+// installed or the command failed.
+type usageLoadedMsg struct {
+	Agg         *claudeusage.Aggregate
+	Codex       usage.AgentSummary
+	Antigravity usage.AgentSummary
+	// Others carries the second-wave agents (OpenCode, Kimi, …) read via
+	// the generic JSONL walker — only the agents with actual usage in
+	// the window, so the dashboard sizes its rows to what you use.
+	Others       []usage.NamedSummary
+	CcusageBlock *ccusageBlock
+	// OpenRouter is the account spend pulled from OpenRouter's /key
+	// endpoint when [openrouter] is enabled in config. Enabled=false
+	// (the default) renders no row.
+	OpenRouter daemon.OpenRouterSpend
+	Err        error
+}
+
+// ccusageBlock is the billing-block data returned by ccusage. Kept as
+// an unexported type so only the messages and dashboard need to import
+// internal/ccusage; other screens don't need the dependency.
+type ccusageBlock struct {
+	CostUSD             float64
+	BurnRateCostPerHour float64
+	ProjectedTotalCost  float64
+	EndTime             time.Time
+	IsActive            bool
+}
+
+// conversationsLoadedMsg carries the result of a Conversations-screen
+// refresh. The screen reads it via App and forwards List to its model.
+// Err is non-nil only when every agent's walker failed — a per-agent
+// failure is logged and swallowed so one corrupt transcript dir
+// doesn't blank the whole list.
+type conversationsLoadedMsg struct {
+	List []conversations.Conversation
+	Err  error
+}
+
+// conversationStatsLoadedMsg carries the lazy message-count result
+// that backs the detail pane's "messages N" row. Fired by a Cmd the
+// conversations screen kicks off when the cursor lands on a row whose
+// count isn't cached yet. ID lets the handler reject stale results.
+type conversationStatsLoadedMsg struct {
+	ID    string
+	Count int
+	Err   error
+}
+
+// conversationPreviewLoadedMsg carries the recent-messages slice that
+// backs the `p` transcript-preview overlay. The App pushes the result
+// into a.convPreview via SetMessages / SetLoadErr; ID lets the handler
+// reject a late result if the user has already closed the overlay or
+// armed it against a different conversation.
+type conversationPreviewLoadedMsg struct {
+	ID       string
+	Messages []conversations.Message
+	Err      error
+}
+
+// openConversationsForProjectMsg is the Projects-screen → App
+// trigger for the per-project drill-down: pressing `c` on a project
+// row emits this with the project's path, App switches to
+// ScreenConversations and pre-applies the path as a filter so the
+// user lands on a view scoped to "this project's history."
+type openConversationsForProjectMsg struct {
+	Project string
+}
+
+// updateCheckMsg carries the result of the launch-time auto-update
+// check. Err non-nil means "couldn't tell" (no checkout, no upstream,
+// offline) — the App silently ignores it; no banner. On success the
+// App stores Result so the dashboard can render the "update
+// available" banner when Result.Available().
+type updateCheckMsg struct {
+	Result selfupdate.Result
+	Err    error
+}
+
+// conversationDeletedMsg fires after a delete attempt completes. The
+// App handler toasts the result and, on success, refreshes the
+// Conversations list so the deleted row disappears immediately.
+type conversationDeletedMsg struct {
+	// ID is the conversation that was (or wasn't) deleted, for the
+	// toast wording.
+	ID string
+
+	// Agent is the agent the conversation belonged to, also for the
+	// toast.
+	Agent string
+
+	// Err is non-nil when the transcript couldn't be removed (path
+	// guard rejected it, file already gone, permission denied).
+	Err error
+}
+
+// conversationResumedMsg fires after a resume attempt completes (the
+// tmux session has been spawned, or the attempt errored). Drives the
+// post-resume toast + sessions refresh so the new session shows up
+// immediately in the Sessions tab.
+type conversationResumedMsg struct {
+	// Session is the name of the new tmux session ccmux created for
+	// the resumed conversation. Used by App to switch focus to it.
+	Session string
+
+	// Project is the resolved project label/path of the conversation,
+	// for toast wording.
+	Project string
+
+	// Agent is the agent the conversation belongs to, for toast
+	// wording and the post-resume attach.
+	Agent string
+
+	// Err is non-nil when the resume couldn't be started (agent
+	// binary missing, tmux call failed, etc.).
+	Err error
+}
+
+// Claude config screen messages.
+
+// claudeReloadMsg asks the Claude config screen to re-read settings.json
+// and re-list commands/skills, e.g. after the user edited settings.json
+// in $EDITOR.
+type claudeReloadMsg struct{}
+
+// claudeModelChangedMsg signals that SetModel completed. Carries the
+// backup path so the screen can surface "backup at …" in a toast.
+type claudeModelChangedMsg struct {
+	New    string
+	Backup string
+	Err    error
+}
+
+// claudeEffortChangedMsg signals that SetEffortLevel completed. Same
+// shape as the model variant — New is the chosen level ("xhigh" / "" /
+// etc.), Backup is the settings.json snapshot path.
+type claudeEffortChangedMsg struct {
+	New    string
+	Backup string
+	Err    error
+}
+
+// claudeAlwaysThinkingChangedMsg signals that SetAlwaysThinking completed.
+// New carries the resulting on/off state so the toast can read "turned on"
+// vs "turned off" without re-reading settings.json.
+type claudeAlwaysThinkingChangedMsg struct {
+	New    bool
+	Backup string
+	Err    error
+}
+
+// claudeYoloChangedMsg signals that SetYoloMode completed. Same shape
+// as the always-thinking variant — New is the resulting on/off state.
+type claudeYoloChangedMsg struct {
+	New    bool
+	Backup string
+	Err    error
+}

@@ -1,0 +1,40 @@
+╭──────────────────────────────────────╮ ╭─────────────────────────────────────────────────────────────────────────────╮
+│ ccmux ◀                              │ │ docs/api.md                                                                 │
+│ ● local                              │ │ ─────────────────────────────────────────────────────────────────────────── │
+│                                      │ │                                                                             │
+│ search: "refresh"                    │ │                                                                             │
+│ 3 hit(s) — esc clears, enter opens   │ │                                                                             │
+│                                      │ │                                                                             │
+│ ▌ [docs/api.md:12]  The old refresh  │ │                                                                             │
+│ token is …                           │ │                                                                             │
+│   [CLAUDE.md:47]  run `make refresh` │ │                                                                             │
+│ after …                              │ │                                                                             │
+│   [internal/daemon/auth.go:88]  //   │ │                                                                             │
+│ refresh: rotate the be…              │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │                                                                             │
+│                                      │ │ tab: focus list   j/k: scroll (currently focused: list)   100%              │
+╰──────────────────────────────────────╯ ╰─────────────────────────────────────────────────────────────────────────────╯
+? help · q quit · enter open · →/← expand/collapse · n new note · e edit · / search · i info · H device                 
