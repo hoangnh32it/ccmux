@@ -57,18 +57,41 @@ phase nào vừa xong, để lịch sử git phản ánh đúng tiến độ tà
 - [x] Init git repo cho `ccmux-main`, tạo GitHub repo
       `hoangnh32it/ccmux` (public), push baseline commit
 
-## Phase 1 — File-tree cho mọi loại file (~2 phiên, 5–7h)
+## Phase 1 — File-tree cho mọi loại file (~2 phiên, 5–7h) ✅ DONE 2026-08-01
 
-- [ ] Tạo package mới `internal/filebrowser` (hoặc mở rộng
-      `internal/notes`) để walk toàn bộ project tree, không lọc theo
-      `.md`, vẫn tôn trọng việc bỏ qua `.git`/`node_modules`/build dirs
-      như notes hiện tại đang làm
-- [ ] Tái sử dụng logic thu/phóng thư mục (`applyDefaultFolds`,
-      `collapseFolder`, `visibleRows`...) từ `notes.go`
-- [ ] Thêm binary-file detection (tránh load file nhị phân vào preview)
-- [ ] Unit test cho walk logic + fold/unfold (table-driven, theo style
-      test hiện có)
-- [ ] Commit + push lên GitHub (`git push origin main`) khi Phase 1 xong
+- [x] Tạo package mới `internal/filebrowser` (`filebrowser.go`) walk
+      toàn bộ project tree, không lọc theo `.md`, vẫn bỏ qua
+      `.git`/`node_modules`/build dirs — `skipDir` giữ **y hệt**
+      `internal/notes.skipDir` để Notes và Files thống nhất về "cái gì
+      thuộc về project". Chỉ liệt kê regular file (bỏ symlink/socket/
+      device — đi theo symlink dir dễ ra ngoài cây hoặc lặp vô hạn).
+      Thư mục không đọc được (permission denied) bị skip chứ không làm
+      hỏng cả listing
+- [x] Tái sử dụng logic thu/phóng thư mục từ `notes.go`, nhưng tách ra
+      thành **hàm thuần** trong `tree.go` (`VisibleRows`, `FolderDirs`,
+      `DefaultFolds`, `ParentDir`, `DescendantOf`) thay vì method trên
+      model — không phụ thuộc Bubble Tea nên test được trực tiếp, và
+      Phase 3 chỉ còn việc nối dây
+- [x] Thêm binary-file detection (`binary.go`): sniff tối đa 8000 byte
+      (ngưỡng của git), coi là binary nếu có byte NUL hoặc không phải
+      UTF-8 hợp lệ. Sniff **lười** — chỉ chạy trên file sắp preview,
+      không chạy cho từng dòng listing (mở 614 file mỗi lần render là
+      không chấp nhận được)
+- [x] Unit test cho walk logic + fold/unfold + binary detection
+      (table-driven): 30 test, `go test ./...` sạch (48 package)
+- [x] Commit + push lên GitHub (`git push origin main`) khi Phase 1 xong
+
+**Ngoài checklist:** `Tree.Resolve` kiểm tra containment (chặn `..`,
+đường dẫn tuyệt đối, và symlink trỏ ra ngoài cây) trước khi `Read`.
+Phase 6 sẽ nhận `<path>` từ dòng lệnh và — với `--host` — từ mạng, nên
+đây là thuộc tính đúng-sai của primitive đọc file, không phải tính năng
+thêm.
+
+**Cần quyết định trước Phase 3:** `bin/` không nằm trong `skipDir`
+(notes cũng không có), nên khi browse chính repo ccmux thì 3 binary đã
+build hiện ra trong cây. Nếu muốn ẩn, thêm `"bin"` vào `skipDir` —
+nhưng lúc đó Files sẽ lệch khỏi Notes, và `bin/` là source thật ở một
+số project (npm `bin/cli.js`).
 
 ## Phase 2 — Preview syntax-highlight (~2 phiên, 5–7h)
 
