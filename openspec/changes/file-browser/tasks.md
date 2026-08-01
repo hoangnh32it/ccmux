@@ -6,10 +6,10 @@
 
 - [x] 2.1 Add `internal/filebrowser` package: `Tree.List()` returns every regular file (not just `.md`), pruning the same VCS/dependency/build dirs `internal/notes.skipDir` already prunes. Also `Tree.Read`/`Tree.Resolve` (root-containment checked, since `ccmux files read --host` will take the path off the network) and the fold/unfold tree logic (`VisibleRows`, `FolderDirs`, `DefaultFolds`, `ParentDir`, `DescendantOf`) lifted out of `notes.go` as pure functions so `filesModel` in 3.2 is wiring only.
 - [x] 2.2 Add binary-file detection (`IsBinary` / `IsBinaryContent`, NUL-or-invalid-UTF-8 over a bounded 8000-byte sniff) so binary files are flagged and never fed to the highlighter or loaded fully into memory. Sniffed lazily on the previewed file, not per row — a whole-project walk cannot afford to open every file.
-- [ ] 2.3 Promote `github.com/alecthomas/chroma/v2` from indirect to direct in `go.mod`; add a `Highlight(path, content) string` helper using `lexers.Match` by extension, falling back to plain text.
-- [ ] 2.4 Add a preview size cap (skip/truncate highlighting above a threshold) mirroring the TUI's existing performance bar. `Entry.Size` is already populated for it.
+- [x] 2.3 Promote `github.com/alecthomas/chroma/v2` from indirect to direct in `go.mod`; `Highlight(path, content) string` + `HighlightWith(…, style, formatter)` using `lexers.Match` by extension, falling back to unmodified plain text. Style `catppuccin-mocha` matches `styles.DefaultPalette`; formatter `terminal256`. Also `Lang(path)` for the preview header, and `"noop"` as the escape-free formatter golden tests use.
+- [x] 2.4 Preview size caps: `HighlightLimit` (256 KiB — above it, plain text) and `PreviewLimit` (1 MiB — above it, only the head is read). `Tree.Preview(rel)` applies both and reports `Truncated`/`Highlightable`.
 - [x] 2.5 Table-driven unit tests: walk pruning, binary detection, fold/unfold row flattening.
-- [ ] 2.6 Table-driven unit tests: highlight fallback for unknown extensions (lands with 2.3).
+- [x] 2.6 Table-driven unit tests: highlight fallback for unknown extensions, both size caps, markdown staying raw for Glamour.
 
 ## 3. TUI Screen
 

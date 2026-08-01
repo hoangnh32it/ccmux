@@ -93,18 +93,37 @@ build hiện ra trong cây. Nếu muốn ẩn, thêm `"bin"` vào `skipDir` —
 nhưng lúc đó Files sẽ lệch khỏi Notes, và `bin/` là source thật ở một
 số project (npm `bin/cli.js`).
 
-## Phase 2 — Preview syntax-highlight (~2 phiên, 5–7h)
+## Phase 2 — Preview syntax-highlight (~2 phiên, 5–7h) ✅ DONE 2026-08-01
 
-- [ ] Viết renderer dùng `alecthomas/chroma/v2` (promote từ indirect →
-      direct dependency trong `go.mod`)
-- [ ] Map extension → lexer chroma, fallback plain text khi không nhận
-      diện được ngôn ngữ
-- [ ] Giữ nguyên đường Glamour cho file `.md` (không phá Notes hiện tại),
-      chroma cho các loại file khác
-- [ ] Giới hạn kích thước file preview (tránh lag với file lớn) — theo
-      đúng nguyên tắc "Dirty-flag rendering" / hiệu năng ccmux-main đang
-      theo đuổi
-- [ ] Commit + push lên GitHub (`git push origin main`) khi Phase 2 xong
+- [x] Viết renderer dùng `alecthomas/chroma/v2` (`highlight.go`), đã
+      promote indirect → direct trong `go.mod`. Style
+      **`catppuccin-mocha`** — trùng đúng bảng màu của
+      `styles.DefaultPalette`, nên code highlight nằm cùng thế giới màu
+      với phần chrome xung quanh thay vì chửi nhau. Formatter
+      `terminal256` (không phải `terminal16m`: chroma ghi escape thẳng
+      vào string, không đi qua bộ downsample color-profile của lipgloss)
+- [x] Map extension → lexer qua `lexers.Match`, không nhận diện được thì
+      trả về **content nguyên xi** (không dùng `lexers.Fallback` — nó sẽ
+      bọc cả file trong escape mà chẳng tô màu gì)
+- [x] Giữ nguyên đường Glamour cho `.md`: `Preview.Render()` trả markdown
+      thô để filesModel đưa cho Glamour, chroma cho mọi loại khác
+- [x] Giới hạn kích thước: `HighlightLimit` 256 KiB (quá thì plain text)
+      và `PreviewLimit` 1 MiB (quá thì chỉ đọc phần đầu, `Truncated=true`).
+      Chọn file 2 GB tốn đúng bằng chọn file 2 KB
+- [x] Commit + push lên GitHub (`git push origin main`) khi Phase 2 xong
+
+**Kiến trúc:** `Tree.Preview(rel)` làm I/O + phân loại (binary?
+truncated? lexer nào? có highlight nổi không?) và trả **text thô**;
+chọn renderer là việc của caller. TUI gọi Glamour cho `.md` và
+`Highlight` cho phần còn lại, `ccmux files read` in thẳng. Nếu nhét
+nhánh rẽ đó vào trong package thì CLI lại phải bóc ANSI ra khỏi output
+của chính nó.
+
+**Ghi chú `go mod tidy`:** lệnh này đồng thời sửa 4 dep bị đánh dấu sai
+`// indirect` từ trước (`termenv`, `apns2`, `golang.org/x/term`,
+`modernc.org/sqlite` — repo dùng trực tiếp cả 4). Đồ thị module không
+đổi, chỉ comment dịch chỗ. Kích thước binary **không tăng** vì Glamour
+đã kéo sẵn toàn bộ lexer chroma vào rồi.
 
 ## Phase 3 — Màn hình TUI mới + wiring (~2 phiên, 5–8h)
 
