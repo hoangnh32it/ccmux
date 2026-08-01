@@ -67,10 +67,14 @@ type filesModel struct {
 	termWidth  int
 	termHeight int
 
-	// splitRatio is the tree pane's share of the total width. Phase 4
-	// lets the user drag the border to change it; until then it stays
-	// at defaultSplitRatio.
+	// splitRatio is the tree pane's share of the total width, moved by
+	// dragging the border between the panes. See files_mouse.go.
 	splitRatio float64
+
+	// draggingSplit is true between a press on the split border and
+	// the matching release, so intermediate motion events are only
+	// treated as a resize when a drag actually started there.
+	draggingSplit bool
 
 	pickingProject bool
 	projCursor     int
@@ -627,11 +631,11 @@ func (m filesModel) Update(msg tea.Msg) (filesModel, tea.Cmd) {
 
 // updateMouse routes a mouse event by the column it landed in. Wheel
 // events over the tree move the cursor; over the preview they scroll
-// the viewport. Non-wheel events are ignored for now — click-to-focus
-// and drag-to-resize arrive in files_mouse.go.
+// the viewport. Press, drag, and release go to files_mouse.go, which
+// owns click-to-focus and drag-to-resize.
 func (m filesModel) updateMouse(msg tea.MouseMsg) (filesModel, tea.Cmd) {
 	if !isWheelMsg(msg) {
-		return m, nil
+		return m.updateMousePointer(msg)
 	}
 	if msg.X < treeWidth(m.termWidth, m.splitRatio) {
 		n := m.listLen()

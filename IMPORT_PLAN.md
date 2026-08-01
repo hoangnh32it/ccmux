@@ -155,17 +155,28 @@ phía CLI (Phase 6), không yêu cầu ở TUI. Cũng không cache entry theo
 project như Notes: mục đích của cây Files là thấy đĩa **ngay lúc này**,
 cache cả phiên sẽ giấu đúng những file agent vừa ghi ra.
 
-## Phase 4 — Mouse: click-focus + drag-resize (~1–2 phiên, 4–6h)
+## Phase 4 — Mouse: click-focus + drag-resize (~1–2 phiên, 4–6h) ✅ DONE 2026-08-01
 
-- [ ] `app.go` đã có xử lý `tea.MouseMsg` ở tầng router — kiểm tra đã
-      hook click-to-focus pane chưa, mở rộng cho vùng tree/preview
-      của Files screen
-- [ ] Drag border giữa tree và preview để đổi tỉ lệ cột (ccmux-master
-      làm bằng cách track `MouseDrag` + so sánh vị trí X) — thêm state
-      lưu tỉ lệ, tương tự cách notes.go quản lý `previewPaneSize()`
-- [ ] Test tương tác chuột (nếu có harness) hoặc ít nhất unit test cho
-      hàm tính lại tỉ lệ cột từ toạ độ chuột
-- [ ] Commit + push lên GitHub (`git push origin main`) khi Phase 4 xong
+- [x] Kiểm tra rồi: router `tea.MouseMsg` trong `app.go` **chỉ** forward
+      wheel, còn lại nuốt hết. Giờ forward cả non-wheel — nhưng **chỉ
+      cho Files**. Các màn khác vẫn nuốt, để một cú click lạc không làm
+      dịch selection mà người dùng đang không nhìn
+- [x] Toạ độ chuột đến ở hệ terminal tuyệt đối, trong khi màn hình chỉ
+      biết các dòng nó tự vẽ → `bodyMouse()` trừ đi `headerRows`.
+      `TestHeaderRowsMatchesRenderedHeader` ghim hằng số này vào chiều
+      cao thật của tab strip (nếu tab strip thành 2 dòng thì **mọi** cú
+      click trên Files lệch 1 dòng mà không ai biết)
+- [x] Drag border (`internal/tui/files_mouse.go`): press vào border
+      (±1 cột slack — mục tiêu rộng 1 ô thì không ai bấm trúng) bật
+      `draggingSplit`, motion tính lại `splitRatio`, release tắt. Viewport
+      preview được lay lại **và** render lại nội dung ở bề rộng mới,
+      không thì chữ vẫn wrap theo cột cũ
+- [x] Test: `TestRatioForX` (hàm thuần, cả 2 biên clamp, 2 phía của
+      biên min, và terminal rộng 0 — xảy ra thật trước `WindowSizeMsg`
+      đầu tiên) + 10 test tương tác qua `Update`.
+      `TestClickSelectsRow` **suy Y từ output render thật** thay vì
+      hardcode offset, nên số học dòng không mục nát khi header pane đổi
+- [x] Commit + push lên GitHub (`git push origin main`) khi Phase 4 xong
 
 ## Phase 5 — cd tracking tự động (~1 phiên, 3–4h)
 

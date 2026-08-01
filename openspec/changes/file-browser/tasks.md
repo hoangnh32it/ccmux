@@ -22,9 +22,9 @@
 
 ## 4. Mouse Support
 
-- [ ] 4.1 Extend the router-level `tea.MouseMsg` handling in `app.go` to route clicks to the Files screen's tree/preview panes (click-to-focus).
-- [ ] 4.2 Add drag-to-resize between tree and preview in `filesModel`, tracking mouse X during `MouseMotion`/`MouseDrag` and recomputing the split ratio (analogous to `notesModel.previewPaneSize()`, but user-adjustable).
-- [ ] 4.3 Unit test the split-ratio-from-mouse-X computation directly (pure function, no terminal needed).
+- [x] 4.1 Router-level `tea.MouseMsg` handling in `app.go` now forwards non-wheel events to Files (only Files — every other screen keeps absorbing them, so a stray click can't move a selection the user wasn't looking at). Coordinates are translated from absolute terminal space to body space by `bodyMouse`, using the `headerRows` constant that `TestHeaderRowsMatchesRenderedHeader` pins to the real tab strip. Click focuses a pane; click on a row selects it.
+- [x] 4.2 Drag-to-resize in `internal/tui/files_mouse.go`: press on the border (with ±1 column of slack — a one-cell grab target is unhittable) arms `draggingSplit`, motion recomputes `splitRatio`, release ends it. The preview viewport is re-laid and its content re-rendered at the new width, or it would stay wrapped for the old column. Narrow layout has no second pane, so nothing is grabbable there.
+- [x] 4.3 `TestRatioForX` covers the pure conversion directly, including both clamp bounds, either side of the min bound, and a zero-width terminal (which happens before the first `WindowSizeMsg`). `TestClickSelectsRow` derives the click's Y from the actual render rather than hard-coding an offset, so the row arithmetic can't rot when the pane header changes.
 
 ## 5. cwd Tracking
 

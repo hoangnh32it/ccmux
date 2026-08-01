@@ -165,6 +165,20 @@ func tabBarMinWidth() int {
 	return width
 }
 
+// headerRows is how many terminal rows the tab strip occupies.
+// renderHeader ends in forceSingleLine, so it is always exactly one —
+// TestHeaderRowsMatchesRenderedHeader pins that, because a screen that
+// maps clicks onto its own rows is wrong by this much if it drifts.
+const headerRows = 1
+
+// bodyMouse translates a mouse event from absolute terminal
+// coordinates into body-relative ones, so a screen can compare the Y
+// against the rows it drew without knowing what chrome sits above it.
+func bodyMouse(msg tea.MouseMsg) tea.MouseMsg {
+	msg.Y -= headerRows
+	return msg
+}
+
 // App is the root Bubble Tea model.
 type App struct {
 	cfg     config.Config
@@ -1065,19 +1079,28 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Forward wheel events to the active screen so its
 		// scrollable regions (notes preview, agents browser preview,
-		// etc.) can respond. Non-wheel mouse events are intentionally
-		// swallowed — clicks/drags don't drive navigation here, and
-		// absorbing them keeps the rest of the app pointer-free.
+		// etc.) can respond.
 		if isWheelMsg(msg) {
 			var cmd tea.Cmd
 			switch a.screen {
 			case ScreenNotes:
 				a.notes, cmd = a.notes.Update(msg)
 			case ScreenFiles:
-				a.files, cmd = a.files.Update(msg)
+				a.files, cmd = a.files.Update(bodyMouse(msg))
 			case ScreenAgents:
 				a.agentsM, cmd = a.agentsM.Update(msg)
 			}
+			return a, cmd
+		}
+		// Non-wheel mouse events stay swallowed everywhere except
+		// Files, which is the one screen with pointer affordances:
+		// click a pane to focus it, click a row to select it, drag the
+		// border to resize the split. Keeping the default at "absorb"
+		// means the rest of the app stays pointer-free, so a stray
+		// click can't move a selection the user wasn't looking at.
+		if a.screen == ScreenFiles {
+			var cmd tea.Cmd
+			a.files, cmd = a.files.Update(bodyMouse(msg))
 			return a, cmd
 		}
 		return a, nil
