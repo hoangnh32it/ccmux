@@ -76,12 +76,24 @@ func TestHarness_CcmuxPathUsesTempBuild(t *testing.T) {
 		t.Fatalf("PATH ccmuxd = %q, want temp build %q", ccmuxdPath, builtCcmuxd)
 	}
 
+	// The guarantee is that no installed ccmux is reachable *before*
+	// the built one — not that such a directory is absent from PATH
+	// entirely. Those were the same rule until it turned out
+	// `brew install ccmux` shares /opt/homebrew/bin with tmux, and
+	// removing the directory outright took tmux down with it (see
+	// TestE2EPath_KeepsTmuxReachable). Ordering enforces the same
+	// property without the collateral damage: the LookPath assertions
+	// above are what actually matter, and this loop pins the ordering
+	// that makes them hold.
 	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
 		if dir == binDir {
+			break // everything from here on is shadowed
+		}
+		if dir == stubBinDir {
 			continue
 		}
 		if executableExists(filepath.Join(dir, "ccmux")) || executableExists(filepath.Join(dir, "ccmuxd")) {
-			t.Fatalf("e2e PATH includes installed ccmux dir %q", dir)
+			t.Fatalf("installed ccmux dir %q precedes the built-binary dir %q on the e2e PATH", dir, binDir)
 		}
 	}
 
@@ -106,4 +118,35 @@ func TestHarness_TmuxIsolated(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestE2EPath_KeepsTmuxReachable is a regression guard for a harness
+// bug that made `make test-e2e` unrunnable on any machine where ccmux
+// is installed from Homebrew.
+//
+// e2ePath() drops every PATH directory holding an installed ccmux, so
+// a test can never exec the user's real binary instead of the freshly
+// built one. On macOS, `brew install ccmux` puts ccmux in
+// /opt/homebrew/bin — the same directory as tmux. Dropping it took
+// tmux with it, and roughly twenty tests failed with "tmux: executable
+// file not found in $PATH", pointing nowhere near the cause.
+//
+// The fix keeps such a directory but relies on stubBinDir and binDir
+// being *first*: LookPath still resolves ccmux to the built binary.
+// This test pins both halves of that bargain.
+func TestE2EPath_KeepsTmuxReachable(t *testing.T) {
+	realTmux, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("tmux not installed — nothing to keep reachable")
+	}
+
+	t.Setenv("PATH", e2ePath())
+
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Errorf("e2ePath() dropped tmux (%s) from PATH: %v", realTmux, err)
+	}
+
+	// The other half of the bargain — ccmux still resolving to the
+	// built binary rather than an installed one — is pinned by
+	// TestHarness_CcmuxPathUsesTempBuild.
 }

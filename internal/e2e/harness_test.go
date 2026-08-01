@@ -109,12 +109,20 @@ func e2ePath() string {
 		if dir == "" || dir == stubBinDir || dir == binDir {
 			continue
 		}
-		if executableExists(filepath.Join(dir, "ccmux")) || executableExists(filepath.Join(dir, "ccmuxd")) {
+		if hasInstalledCCMux(dir) && !executableExists(filepath.Join(dir, "tmux")) {
 			continue
 		}
 		parts = append(parts, dir)
 	}
 	return strings.Join(parts, string(os.PathListSeparator))
+}
+
+// hasInstalledCCMux reports whether dir holds a ccmux the tests must
+// not exec — a user's real install rather than the freshly built
+// binaries under binDir.
+func hasInstalledCCMux(dir string) bool {
+	return executableExists(filepath.Join(dir, "ccmux")) ||
+		executableExists(filepath.Join(dir, "ccmuxd"))
 }
 
 func executableExists(path string) bool {

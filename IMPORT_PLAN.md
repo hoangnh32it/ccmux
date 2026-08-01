@@ -229,15 +229,36 @@ chỉ đích danh cái cây họ muốn, tick sau giật đi là hành xử thù
       loại file, cờ binary, prune, guard method/project, 404
 - [x] Commit + push lên GitHub (`git push origin main`) khi Phase 6 xong
 
-## Phase 7 — Tests tổng hợp + fuzz (nếu áp dụng) (~1 phiên, 3–4h)
+## Phase 7 — Tests tổng hợp + fuzz (~1 phiên, 3–4h) ✅ DONE 2026-08-01
 
-- [ ] `go test ./...` sạch trước khi coi là xong (yêu cầu bắt buộc của
-      repo)
-- [ ] e2e test trong `internal/e2e/` cho CUJ mới: mở Files screen, click
-      chọn file, xem preview, resize
-- [ ] Cross-compile check `GOOS=windows`, `GOOS=linux` nếu đụng code
-      OS-specific (mouse/path handling)
-- [ ] Commit + push lên GitHub (`git push origin main`) khi Phase 7 xong
+- [x] `go test ./...`, `gofmt -l`, `go vet ./...` (kèm
+      `-tags integration`) sạch; `make test-e2e` sạch
+- [x] 6 e2e test trong `internal/e2e/files_test.go`: CUJ duyệt cây +
+      preview + prune + binary; `ccmux files list|read` chạy với daemon
+      thật qua socket (gồm cả từ chối binary và chặn traversal);
+      endpoint `/v1/files` qua `daemon.Client`; luồng TUI tương tác; và
+      **drag-resize bằng escape sequence SGR thật qua PTY** — đây mới là
+      thứ chứng minh `tea.WithMouseCellMotion` đang bật và event tới
+      được màn hình này
+- [x] Cross-compile linux/amd64, windows/amd64, windows/arm64
+- [x] Fuzz: `FuzzIsBinaryContent` và `FuzzResolve` (bất biến bảo mật:
+      không đường dẫn nào Resolve chấp nhận mà thoát ra khỏi root — đúng
+      thứ `ccmux files read --host` dựa vào). Cả hai vào `FUZZ_TARGETS`,
+      mỗi cái ~3 giây ở mức 100k exec của CI. `FuzzHighlight` có viết
+      nhưng **cố ý không** đưa vào danh sách: nó tốn ~5 phút 30 ở cùng
+      mức, chiếm gần hết job fuzz của một PR cho một target; seed corpus
+      của nó vẫn chạy trong mọi `go test`
+- [x] Commit + push lên GitHub (`git push origin main`) khi Phase 7 xong
+
+**Sửa bug có sẵn của harness (không liên quan feature này):**
+`make test-e2e` không chạy được trên bất kỳ máy nào cài ccmux qua
+Homebrew. `e2ePath()` loại **mọi** thư mục PATH có chứa ccmux đã cài —
+trên macOS đó là `/opt/homebrew/bin`, đúng chỗ `tmux` nằm — nên khoảng
+20 test fail với "tmux: executable file not found in $PATH", thông báo
+lỗi chỉ vào chỗ chẳng liên quan gì tới nguyên nhân. Bảo đảm "test không
+bao giờ exec ccmux đã cài" giờ được thực thi bằng **thứ tự** (binary vừa
+build đứng trước) thay vì bằng cách xoá thư mục. Thêm
+`TestE2EPath_KeepsTmuxReachable` để chặn hồi quy.
 
 ## Phase 8 — Docs (~0.5–1 phiên, 1–2h)
 

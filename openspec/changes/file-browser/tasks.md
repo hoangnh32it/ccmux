@@ -39,9 +39,11 @@
 
 ## 7. Verification
 
-- [ ] 7.1 `go test ./...` clean, `gofmt -l` clean, `go vet ./...` clean.
-- [ ] 7.2 Cross-compile `GOOS=windows` and `GOOS=linux` (mouse handling and path joins touch OS-specific code).
-- [ ] 7.3 e2e CUJ test in `internal/e2e/`: open Files screen, navigate tree, select a non-markdown file, confirm highlighted preview renders, resize via mouse.
+- [x] 7.1 `go test ./...`, `gofmt -l`, `go vet ./...` (and `go vet -tags integration`) all clean; `make test-e2e` clean.
+- [x] 7.2 Cross-compiles for linux/amd64, windows/amd64, and windows/arm64.
+- [x] 7.3 Six e2e tests in `internal/e2e/files_test.go`: package-level browse/preview/prune/binary CUJ, `ccmux files list|read` against a live daemon over its socket (including binary refusal and traversal rejection), the `/v1/files` endpoint through `daemon.Client`, the interactive TUI flow, and drag-resize driven by real SGR mouse sequences through the PTY — which is what proves `tea.WithMouseCellMotion` is on and the events reach this screen.
+- [x] 7.4 Fuzz targets: `FuzzIsBinaryContent` (sniff never panics, stays bounded, NUL always means binary, valid UTF-8 never does) and `FuzzResolve` (nothing Resolve accepts escapes the root — the invariant `ccmux files read --host` depends on). Both added to the Makefile's `FUZZ_TARGETS`; each runs in ~3s at CI's 100k-exec budget. `FuzzHighlight` exists but is deliberately left out of that list — it costs ~5m30s at the same budget, which is most of a PR's fuzz job for one target; its seed corpus still runs on every `go test`.
+- [x] 7.5 Fixed a pre-existing harness bug that made `make test-e2e` unrunnable wherever ccmux is installed from Homebrew: `e2ePath()` dropped every PATH directory holding an installed ccmux, and on macOS that is `/opt/homebrew/bin` — the same directory as tmux. About twenty tests failed with "tmux: executable file not found in $PATH". The safety property is now enforced by ordering (built binaries first) rather than by removing the directory.
 
 ## 8. Docs
 

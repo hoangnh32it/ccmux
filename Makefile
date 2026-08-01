@@ -177,7 +177,9 @@ FUZZ_TARGETS := \
 	./internal/claude:FuzzClassify \
 	./internal/tmux:FuzzSessionNameForPath \
 	./internal/tui:FuzzRenderSessionLine_DegenerateInputs \
-	./internal/tui:FuzzDialTarget
+	./internal/tui:FuzzDialTarget \
+	./internal/filebrowser:FuzzIsBinaryContent \
+	./internal/filebrowser:FuzzResolve
 
 fuzz: check-go
 	@for pair in $(FUZZ_TARGETS); do \
